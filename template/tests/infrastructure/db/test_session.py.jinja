@@ -1,0 +1,111 @@
+"""The session-per-request dependency: one transaction per request."""
+
+from collections.abc import AsyncIterator
+from dataclasses import replace
+
+import httpx2
+import pytest
+from fastapi import FastAPI
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+
+from {{ package_name }}.api.dependencies import DbSessionDep, get_app_state
+from {{ package_name }}.domain.errors import ConflictError
+from {{ package_name }}.infrastructure.db.engine import create_db_engine
+from {{ package_name }}.main import create_app
+from {{ package_name }}.settings import Settings
+
+pytestmark = pytest.mark.integration
+
+
+def _add_probe_routes(app: FastAPI) -> FastAPI:
+    """Routes that write to the `probe` table through `DbSessionDep`."""
+
+    async def add(value: int, session: DbSessionDep) -> None:
+        await session.execute(text("INSERT INTO probe VALUES (:value)"), {"value": value})
+
+    async def add_then_fail(value: int, session: DbSessionDep) -> None:
+        await session.execute(text("INSERT INTO probe VALUES (:value)"), {"value": value})
+        raise ConflictError("probe rejected")
+
+    async def add_twice(value: int, session: DbSessionDep) -> None:
+        # Fine until COMMIT: the primary key is checked only then (DEFERRABLE).
+        await session.execute(text("INSERT INTO probe VALUES (:value), (:value)"), {"value": value})
+
+    app.add_api_route("/probe/{value}", add, methods=["POST"])
+    app.add_api_route("/probe/{value}/fail", add_then_fail, methods=["POST"])
+    app.add_api_route("/probe/{value}/twice", add_twice, methods=["POST"])
+    return app
+
+
+async def _probe_values(connection: AsyncConnection) -> list[int]:
+    result = await connection.execute(text("SELECT value FROM probe ORDER BY value"))
+    return list(result.scalars())
+
+
+@pytest.fixture
+async def db_app(
+    db_app: FastAPI,
+    db_connection: AsyncConnection,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> FastAPI:
+    """Requests use the test's rolled-back connection, where `probe` is a temporary table."""
+    await db_connection.execute(text("CREATE TEMPORARY TABLE probe (value int PRIMARY KEY)"))
+    db_app.dependency_overrides[get_app_state] = lambda: replace(
+        db_app.state.app_state, db_session_factory=db_session_factory
+    )
+    return _add_probe_routes(db_app)
+
+
+async def test_session_commits_when_the_route_returns(
+    db_client: httpx2.AsyncClient, db_connection: AsyncConnection
+) -> None:
+    response = await db_client.post("/probe/1")
+
+    assert response.status_code == 200
+    assert await _probe_values(db_connection) == [1]
+
+
+async def test_session_rolls_back_when_the_route_raises(
+    db_client: httpx2.AsyncClient, db_connection: AsyncConnection
+) -> None:
+    response = await db_client.post("/probe/1/fail")
+
+    assert response.status_code == 409
+    assert await _probe_values(db_connection) == []
+
+
+@pytest.fixture
+async def committing_client(db_settings: Settings) -> AsyncIterator[httpx2.AsyncClient]:
+    """Client for an app with real commits; `probe` is a real table, dropped afterwards."""
+    engine = create_db_engine(db_settings.db)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("CREATE TABLE probe (value int PRIMARY KEY DEFERRABLE INITIALLY DEFERRED)")
+        )
+    app = _add_probe_routes(create_app(db_settings))
+    transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
+    try:
+        async with (
+            app.router.lifespan_context(app),
+            httpx2.AsyncClient(transport=transport, base_url="http://test") as client,
+        ):
+            yield client
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP TABLE probe"))
+        await engine.dispose()
+
+
+async def test_failed_commit_is_an_error_response(
+    committing_client: httpx2.AsyncClient, db_settings: Settings
+) -> None:
+    # The commit runs before the response is sent, so the client never sees a 200
+    # for data that was not stored.
+    response = await committing_client.post("/probe/1/twice")
+
+    assert response.status_code == 500
+    engine = create_db_engine(db_settings.db)
+    async with engine.connect() as connection:
+        assert await _probe_values(connection) == []
+    await engine.dispose()

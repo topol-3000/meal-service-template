@@ -55,7 +55,9 @@ def test_live_returns_ok(client: TestClient) -> None:
     assert response.json()["service"].startswith("meal-")
 
 
-def test_ready_without_checks_is_ok(client: TestClient) -> None:
+def test_ready_without_checks_is_ok(app: FastAPI, client: TestClient) -> None:
+    _use_readiness_checks(app, {})
+
     response = client.get("/health/ready")
 
     assert response.status_code == 200
@@ -97,3 +99,13 @@ def test_ready_counts_a_check_over_the_timeout_as_failed(app: FastAPI, client: T
 
     assert response.status_code == 503
     assert response.json()["checks"] == {"database": "failed", "cache": "ok"}
+{%- if with_database %}
+
+
+def test_ready_reports_an_unreachable_database(client: TestClient) -> None:
+    # The `settings` fixture points the database at a port nobody listens on.
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json()["checks"] == {"database": "failed"}
+{%- endif %}

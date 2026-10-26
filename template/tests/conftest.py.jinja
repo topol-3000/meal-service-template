@@ -1,6 +1,16 @@
+{% if with_database -%}
+from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
+
+import httpx2
+import pytest
+from alembic import command
+from alembic.config import Config
+{% else -%}
 from collections.abc import Iterator
 
 import pytest
+{% endif -%}
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry import trace
@@ -10,9 +20,17 @@ from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogR
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+{%- if with_database %}
+from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+from testcontainers.community.postgres import PostgresContainer
+{%- endif %}
 
+{% if with_database -%}
+from {{ package_name }}.infrastructure.db.engine import create_db_engine
+{% endif -%}
 from {{ package_name }}.main import create_app
-from {{ package_name }}.settings import Settings
+from {{ package_name }}.settings import {% if with_database %}DatabaseSettings, {% endif %}Settings
 
 # OTel global providers can be set only once per process: install in-memory ones
 # for the whole test session and clear them between tests.
@@ -28,10 +46,28 @@ _logger_provider.add_log_record_processor(SimpleLogRecordProcessor(_LOGS))
 set_logger_provider(_logger_provider)
 
 
+{%- if with_database %}
+
+# Match the major version the service runs on.
+POSTGRES_IMAGE = "postgres:18-alpine"
+# Nothing listens there: unit tests that reach the database fail at once instead of hanging.
+UNIT_TEST_DATABASE_URL = "postgresql+asyncpg://test:test@127.0.0.1:1/test"
+{%- endif %}
+
+
 @pytest.fixture
 def settings() -> Settings:
     # otel_enabled=False: keep the in-memory providers above instead of OTLP exporters.
+{%- if with_database %}
+    return Settings(
+        environment="test",
+        log_format="json",
+        otel_enabled=False,
+        db=DatabaseSettings(url=SecretStr(UNIT_TEST_DATABASE_URL)),
+    )
+{%- else %}
     return Settings(environment="test", log_format="json", otel_enabled=False)
+{%- endif %}
 
 
 @pytest.fixture
@@ -57,3 +93,88 @@ def app(settings: Settings) -> FastAPI:
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+{%- if with_database %}
+
+
+# Integration tests (`@pytest.mark.integration`) against a real PostgreSQL.
+
+
+def _alembic_config(database_url: str) -> Config:
+    config = Config(toml_file=str(Path(__file__).parents[1] / "pyproject.toml"))
+    config.attributes["database_url"] = database_url
+    return config
+
+
+@pytest.fixture(scope="session")
+def database_url() -> Iterator[str]:
+    """One PostgreSQL container for the test session, migrated to head once."""
+    with PostgresContainer(POSTGRES_IMAGE, driver="asyncpg") as postgres:
+        url = postgres.get_connection_url()
+        command.upgrade(_alembic_config(url), "head")
+        yield url
+
+
+@pytest.fixture
+def alembic_config(database_url: str) -> Config:
+    """Alembic pointed at the test database, for running migration commands."""
+    return _alembic_config(database_url)
+
+
+@pytest.fixture
+def db_settings(settings: Settings, database_url: str) -> Settings:
+    return settings.model_copy(update={"db": DatabaseSettings(url=SecretStr(database_url))})
+
+
+@pytest.fixture
+async def db_connection(db_settings: Settings) -> AsyncIterator[AsyncConnection]:
+    """A connection in a transaction that is rolled back after the test."""
+    engine = create_db_engine(db_settings.db)
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            yield connection
+            await transaction.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+def db_session_factory(db_connection: AsyncConnection) -> async_sessionmaker[AsyncSession]:
+    """Sessions on the test's connection.
+
+    Their commits only release a savepoint, so the test's rollback undoes them too.
+    """
+    return async_sessionmaker(
+        db_connection, expire_on_commit=False, join_transaction_mode="create_savepoint"
+    )
+
+
+@pytest.fixture
+async def db_session(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    """For repository tests: everything written through it is rolled back after the test."""
+    async with db_session_factory() as session:
+        yield session
+
+
+@pytest.fixture
+def db_app(db_settings: Settings) -> FastAPI:
+    """The app on the test database. Override this fixture in a module to add routes."""
+    return create_app(db_settings)
+
+
+@pytest.fixture
+async def db_client(db_app: FastAPI) -> AsyncIterator[httpx2.AsyncClient]:
+    """Client for `db_app`, running its lifespan in the test's own event loop.
+
+    `TestClient` runs the app in a separate loop, and asyncpg connections (like
+    `db_connection`) can't be used from another loop.
+    """
+    transport = httpx2.ASGITransport(app=db_app, raise_app_exceptions=False)
+    async with (
+        db_app.router.lifespan_context(db_app),
+        httpx2.AsyncClient(transport=transport, base_url="http://test") as client,
+    ):
+        yield client
+{%- endif %}

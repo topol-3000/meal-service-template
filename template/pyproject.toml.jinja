@@ -17,6 +17,13 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.45",
     "opentelemetry-instrumentation-fastapi>=0.66b1",
     "opentelemetry-instrumentation-httpx>=0.66b1",
+{%- if with_database %}
+    # <2.1 until opentelemetry-instrumentation-sqlalchemy > 0.66b1 (no 2.1 support before).
+    "sqlalchemy[asyncio]>=2.0.55,<2.1",
+    "asyncpg>=0.32",
+    "alembic>=1.20.1",
+    "opentelemetry-instrumentation-sqlalchemy>=0.66b1",
+{%- endif %}
 ]
 
 [project.scripts]
@@ -31,6 +38,9 @@ dev = [
     "pyright>=1.1.414",
     "import-linter>=2.15",
     "pre-commit>=4.7",
+{%- if with_database %}
+    "testcontainers[postgres]>=4.15",
+{%- endif %}
 ]
 
 [build-system]
@@ -66,7 +76,7 @@ ignore = [
 "typing.Dict".msg = "Use the built-in `dict`"
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests"{% if with_database %}, "migrations"{% endif %}]
 pythonVersion = "{{ python_version }}"
 typeCheckingMode = "strict"
 venvPath = "."
@@ -105,7 +115,27 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
 filterwarnings = ["error"]
+markers = ["integration: needs Docker (testcontainers); `make test-unit` skips these"]
 
+{% if with_database -%}
+[tool.alembic]
+# `make migrate` / `make migration name=...`; env.py reads DB__URL through Settings.
+script_location = "%(here)s/migrations"
+file_template = "%%(year)d_%%(month).2d_%%(day).2d_%%(hour).2d%%(minute).2d_%%(rev)s_%%(slug)s"
+
+[[tool.alembic.post_write_hooks]]
+name = "ruff_fix"
+type = "module"
+module = "ruff"
+options = "check --fix REVISION_SCRIPT_FILENAME"
+
+[[tool.alembic.post_write_hooks]]
+name = "ruff_format"
+type = "module"
+module = "ruff"
+options = "format REVISION_SCRIPT_FILENAME"
+
+{% endif -%}
 [tool.coverage.run]
 source = ["src"]
 branch = true

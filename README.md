@@ -11,6 +11,8 @@ A generated service has:
 
 - **uv** project, Python 3.14, `src/` layout with domain / application / infrastructure / api layers
 - **FastAPI** with `/health/live` and `/health/ready`, pydantic-settings
+- **PostgreSQL** (question `with_database`, default yes): SQLAlchemy 2 async + asyncpg, Alembic,
+  session per request, readiness check, traced queries, testcontainers integration tests
 - **OpenTelemetry**: traces, metrics and logs over OTLP; FastAPI and httpx2 auto-instrumented;
   stable HTTP semantic conventions; trace context helpers for Redis Streams messages
 - **structlog**: JSON logs with `trace_id`/`span_id`, the same records exported to Loki

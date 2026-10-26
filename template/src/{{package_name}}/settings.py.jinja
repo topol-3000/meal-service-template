@@ -1,7 +1,20 @@
 from functools import lru_cache
 from typing import Literal
 
+{% if with_database -%}
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    SecretStr,
+    field_validator,
+)
+{% else -%}
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PositiveInt
+{% endif -%}
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,20 +28,50 @@ class HttpClientSettings(BaseModel):
     max_connections: PositiveInt = 100
 
 
+{% if with_database -%}
+class DatabaseSettings(BaseModel):
+    """PostgreSQL (`infrastructure/db/`). Env: `DB__<FIELD>`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    # postgresql+asyncpg://user:password@host:5432/dbname
+    url: SecretStr
+    pool_size: PositiveInt = 5
+    max_overflow: NonNegativeInt = 10
+
+    @field_validator("url")
+    @classmethod
+    def _uses_asyncpg(cls, url: SecretStr) -> SecretStr:
+        if not url.get_secret_value().startswith("postgresql+asyncpg://"):
+            raise ValueError("must start with postgresql+asyncpg:// (the async driver)")
+        return url
+
+
+{% endif -%}
 class Settings(BaseSettings):
     """Service configuration, read from environment variables and `.env`.
 
     Each adapter gets its own sub-model, filled from `<FIELD>__<SUBFIELD>` variables
     (`HTTP_CLIENT__TIMEOUT_SECONDS=5`), and receives only that slice in `__init__`.
-    Secrets are `SecretStr` fields in a sub-model, for example `url: SecretStr` in a
-    `DatabaseSettings` read from `DB__URL`. Call `.get_secret_value()` only where the value
-    is used; never log it or put it on a span.
+{%- if with_database %}
+    Secrets are `SecretStr` fields in a sub-model, like `DatabaseSettings.url` (`DB__URL`).
+{%- else %}
+    Secrets are `SecretStr` fields in a sub-model, for example `api_key: SecretStr` in an
+    `LlmSettings` read from `LLM__API_KEY`.
+{%- endif %}
+    Call `.get_secret_value()` only where the value is used; never log it or put it on a span.
 
     OpenTelemetry exporters read the standard `OTEL_*` variables themselves
     (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`, ...).
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        env_nested_delimiter="__",
+        # Startup errors name the field and the rule but not the value: it may be a secret.
+        hide_input_in_errors=True,
+    )
 
     service_name: str = "{{ service_name }}"
     service_version: str = "0.1.0"
@@ -46,8 +89,17 @@ class Settings(BaseSettings):
     readiness_check_timeout_seconds: PositiveFloat = 2.0
 
     http_client: HttpClientSettings = Field(default_factory=HttpClientSettings)
+{%- if with_database %}
+    # Required: the service does not start without DB__URL.
+    db: DatabaseSettings
+{%- endif %}
 
 
 @lru_cache
 def get_settings() -> Settings:
+{%- if with_database %}
+    # Required fields (`db`) come from the environment, which pyright can't see.
+    return Settings()  # pyright: ignore[reportCallIssue]
+{%- else %}
     return Settings()
+{%- endif %}

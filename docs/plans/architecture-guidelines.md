@@ -41,7 +41,18 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 
 ### Open questions
 
-None right now. New questions go here with a `Q<n>` id and move to Decisions once answered.
+New questions go here with a `Q<n>` id and move to Decisions once answered.
+
+- **Q5 Migrations in deployment.** How does `alembic upgrade head` run when a service is
+  deployed: a one-off job / init container from the service image, a step in the container
+  entrypoint before uvicorn, or a CI/CD step? Until answered the image contains neither
+  `migrations/` nor the Alembic config (alembic itself is already a runtime dependency).
+- **Q6 Local PostgreSQL.** Where does the database for `make run` / `make migrate` /
+  `make migration` come from: one PostgreSQL in meal-platform compose with a database and
+  user per service, or a compose file per service? `.env.example` currently assumes
+  `localhost:5432` with user, password and database all named after the package.
+- **Q7 PostgreSQL version.** Which major version runs in meal-platform/production?
+  Integration tests pin `postgres:18-alpine` (latest stable; 19 is at RC).
 
 ---
 
@@ -211,13 +222,28 @@ Infrastructure only, no business logic. Each file comes with a test.
 - [x] **3.7** Shared `infrastructure/http.py`: one lifespan-managed `httpx2.AsyncClient`
       factory (timeouts, instrumentation) instead of per-call clients.
       Tracing stays global (`instrument_app`), so httpx2 clients inside libraries are traced too.
-- [ ] **3.8** Copier question `with_database` in `copier.yml` (D6); conditional dependencies
+- [x] **3.8** Copier question `with_database` in `copier.yml` (D6); conditional dependencies
       in `pyproject.toml.jinja`, conditional `.env.example` entries, and `_exclude` rules so
       DB files aren't rendered when it's false.
-- [ ] **3.9** (`with_database`) `infrastructure/db/`: engine/session setup, `Base`, Alembic env
+      `_exclude` covers `infrastructure/db/`, `tests/infrastructure/db/` and `migrations/`;
+      everything else is `{% if with_database %}` blocks (settings, AppState, lifespan,
+      telemetry, Makefile, `.env.example`, AGENTS.md, README).
+- [x] **3.9** (`with_database`) `infrastructure/db/`: engine/session setup, `Base`, Alembic env
       wired to settings, readiness check, `make migrate` / `make migration name=...` targets.
-- [ ] **3.10** (`with_database`) testcontainers fixtures in `tests/conftest.py`, `integration`
+      `DatabaseSettings` (`DB__URL: SecretStr`, required, must be `postgresql+asyncpg://`).
+      Engine created in the lifespan, disposed through the `AsyncExitStack`; `DbSessionDep`
+      commits on success and rolls back on error, with `scope="function"` so the commit
+      happens before the response. `Base` has a constraint naming convention. Readiness
+      check `database` runs `SELECT 1`. Queries traced by `opentelemetry-instrumentation-sqlalchemy`.
+      Alembic config lives in `[tool.alembic]` in `pyproject.toml` (no `alembic.ini`),
+      `migrations/` at the repository root.
+- [x] **3.10** (`with_database`) testcontainers fixtures in `tests/conftest.py`, `integration`
       marker registered in pytest config, `make test-unit` target (D7).
+      Fixtures: `database_url` (session container, migrated once), `db_connection` /
+      `db_session` (rolled back after each test), `db_app` / `db_client` (app on the test
+      database, served in the test's event loop), `alembic_config`. Integration tests cover
+      readiness, span nesting, pool disposal, commit/rollback/failed commit, models vs
+      migrations (`alembic check`) and a downgrade/upgrade round trip.
 - [x] **3.11** Tests: error-mapping test, lifespan open/close test, readiness test, settings parsing test.
 
 ## Phase 4: Port useful parts of the boilerplate
@@ -255,9 +281,12 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
       (vuln, secret, misconfig) + image scan after `docker build`, `CRITICAL,HIGH`, `--ignore-unfixed`.
       A `.trivyignore` with a comment per entry.
 - [ ] **6.2** Dependency audit of `uv.lock` (Trivy fs covers it; decide if a separate step is needed).
-- [ ] **6.3** Template repo CI: render with `with_database=true` and `false` (matrix); both
+- [x] **6.3** Template repo CI: render with `with_database=true` and `false` (matrix); both
       must pass `make check`, pre-commit and the Docker build.
-- [ ] **6.4** Generated service CI runs integration tests (Docker available on the runner, D7).
+      Job names are now `generate-and-check (with_database=true|false)`; update required
+      status checks if branch protection lists the old name.
+- [x] **6.4** Generated service CI runs integration tests (Docker available on the runner, D7).
+      Through `make check`, which runs `make test` (all tests).
 
 ## Phase 7: Verification
 
@@ -286,3 +315,5 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 | 2026-10-26 | httpx replaced by httpx2 in the template (OTel httpx instrumentation supports it since 0.66b1). |
 | 2026-10-26 | D10 agreed: Valkey server, redis-py client. |
 | 2026-10-26 | Chunk 1 done (Phase 2, 3.1–3.7, 3.11) on branch `feat/architecture-chunk-1`: import-linter (2.15) with `make imports`, banned APIs, CI runs `make check`, error/ApiModel/AppState/settings/HTTP-client skeleton with tests. Decided while implementing: direct-imports-only forbidden contract, `AppState` in `api/dependencies.py`, `SecretStr` as docstring example, global httpx2 tracing kept. |
+| 2026-10-26 | Chunk-1 review fixes on branch `feat/architecture-chunk-2` (separate commit): async exception handlers; `HTTPException` with non-str detail (JSON-encoded into `detail`) or an unregistered status (title "Client Error"/"Server Error") gives problem details, 1xx/204/304 get no body; 5xx domain errors log the message and send a generic detail; `/health/ready` runs checks concurrently under `READINESS_CHECK_TIMEOUT_SECONDS` (default 2 s, timeout = "failed"); import-linter forbids `domain` → `settings`, and template CI checks that the contract rejects it. |
+| 2026-10-26 | Chunk 2 done (3.8–3.10, 6.3, 6.4; D3, D6, D7) on `feat/architecture-chunk-2`. Decided while implementing: **SQLAlchemy `>=2.0.55,<2.1`**, because `opentelemetry-instrumentation-sqlalchemy` 0.66b1 refuses 2.1 (support merged upstream 2026-10-14 in PR 5120, not released yet; lift the cap with the next contrib release). SQLAlchemy is instrumented globally in `instrument_app`, like httpx2 (per-engine instrumentation works once per process); `create_db_engine` calls `create_async_engine` through its module so the patched function is used. `OTEL_SEMCONV_STABILITY_OPT_IN=http,database`. `DbSessionDep` uses `scope="function"`, because the default scope commits after the response is sent. `DB__URL` is required and checked for the asyncpg scheme; `Settings` sets `hide_input_in_errors` (both variants), so a bad URL isn't echoed into startup logs. Alembic config in `[tool.alembic]` (no `alembic.ini`), date-prefixed revision files, ruff post-write hooks, async `env.py` reading `DB__URL` via `Settings` and logging through `configure_logging`; generated migrations pass ruff and pyright strict. `alembic` is a runtime dependency, but the image doesn't ship migrations yet (Q5). The `integration` marker and `make test-unit` render in both variants (future Valkey tests). DB integration tests use `httpx2.ASGITransport` in the test's loop instead of `TestClient` (asyncpg connections are loop-bound); the container is session-scoped, engines are per test. Test image `postgres:18-alpine` (Q7). Also: `.import_linter_cache/` gitignored in generated services. Open: Q5–Q7. |

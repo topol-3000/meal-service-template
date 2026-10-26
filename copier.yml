@@ -6,6 +6,11 @@ _min_copier_version: "9.4"
 _subdirectory: template
 _answers_file: .copier-answers.yml
 _templates_suffix: .jinja
+# Files that exist only with the database (D6). Shared files use `{% if with_database %}`.
+_exclude:
+  - "{% if not with_database %}src/{{ package_name }}/infrastructure/db{% endif %}"
+  - "{% if not with_database %}tests/infrastructure/db{% endif %}"
+  - "{% if not with_database %}migrations{% endif %}"
 
 _tasks:
   - command: uv lock
@@ -49,6 +54,11 @@ http_port:
   type: int
   help: HTTP port inside the container and for local `make run`
   default: 8000
+
+with_database:
+  type: bool
+  help: PostgreSQL via SQLAlchemy async + asyncpg + Alembic (engine, sessions, migrations)
+  default: true
 
 python_version:
   type: str
