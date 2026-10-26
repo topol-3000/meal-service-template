@@ -18,6 +18,17 @@ def db_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Settings require DB__URL; tests about it change or delete it.
     monkeypatch.setenv("DB__URL", _DB_URL)
 {%- endif %}
+{%- if with_cache %}
+
+
+_CACHE_URL = "redis://:s3cret@cache:6379/0"
+
+
+@pytest.fixture(autouse=True)
+def cache_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Settings require CACHE__URL; tests about it change or delete it.
+    monkeypatch.setenv("CACHE__URL", _CACHE_URL)
+{%- endif %}
 
 
 def test_nested_settings_are_read_from_double_underscore_variables(

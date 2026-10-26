@@ -18,7 +18,7 @@ read its `AGENTS.md` before changing anything that crosses a service boundary.
 | Types (pyright strict) | `make typecheck` |
 | Layer contracts (import-linter) | `make imports` |
 | Tests | `make test` or `uv run pytest tests/test_x.py -k name` |
-| Tests without `integration` ones{% if with_database %} (no Docker){% endif %} | `make test-unit` |
+| Tests without `integration` ones{% if with_database or with_cache %} (no Docker){% endif %} | `make test-unit` |
 {%- if with_database %}
 | Apply migrations | `make migrate` (`DB__URL` from `.env`; deploys run `python -m {{ package_name }} migrate`) |
 | New migration from models | `make migration name=add_recipes`, then review the file |
@@ -38,6 +38,9 @@ src/{{ package_name }}/
   infrastructure/  adapters implementing ports: DB, HTTP clients, LLM
 {%- if with_database %}
     db/            engine, sessions, ORM `Base` (models.py), repositories, migrations/
+{%- endif %}
+{%- if with_cache %}
+    cache/         `ValkeyCache` (TTL on every write, errors are misses); feature caches wrap it
 {%- endif %}
   api/             FastAPI routers and request/response schemas
   observability/   logging, tracing, metrics (do not bypass)

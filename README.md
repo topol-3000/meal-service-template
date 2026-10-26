@@ -13,6 +13,8 @@ A generated service has:
 - **FastAPI** with `/health/live` and `/health/ready`, pydantic-settings
 - **PostgreSQL** (question `with_database`, default yes): SQLAlchemy 2 async + asyncpg, Alembic,
   session per request, readiness check, traced queries, testcontainers integration tests
+- **Valkey cache** (question `with_cache`, default no): redis-py async client, a `ValkeyCache`
+  adapter (TTL on every write, Valkey down = miss), traced commands, testcontainers integration tests
 - **OpenTelemetry**: traces, metrics and logs over OTLP; FastAPI and httpx2 auto-instrumented;
   stable HTTP semantic conventions
 - **structlog**: JSON logs with `trace_id`/`span_id`, the same records exported to Loki

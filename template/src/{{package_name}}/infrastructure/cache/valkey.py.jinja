@@ -1,0 +1,67 @@
+from typing import cast
+
+from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
+from {{ package_name }}.observability import get_logger
+from {{ package_name }}.settings import CacheSettings
+
+_logger = get_logger(__name__)
+
+# Valkey is down, unreachable or too slow. Any other error is a bug and propagates.
+_UNAVAILABLE = (RedisConnectionError, RedisTimeoutError)
+
+
+def create_cache_client(settings: CacheSettings) -> Redis:
+    """Build the service's one Valkey client (with its own connection pool).
+
+    It is created in the lifespan (`main.py`) and closed on shutdown. It connects on the first
+    command, so the service starts while Valkey is down. A failed command is not retried
+    (redis-py's default), so an unavailable cache costs at most one timeout. Commands are
+    traced by the redis instrumentation in `observability.instrument_app`.
+    """
+    # redis-py leaves the `**kwargs` of `from_url` untyped; both arguments are Redis options.
+    return Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
+        settings.url.get_secret_value(),
+        socket_connect_timeout=settings.connect_timeout_seconds,
+        socket_timeout=settings.timeout_seconds,
+    )
+
+
+class ValkeyCache:
+    """Bytes under string keys, every write with a TTL. The only user of the redis client.
+
+    Generic on purpose: a feature defines its own port in `domain/` (`RecipeCache`) and an
+    adapter here that wraps this class, builds the keys and (de)serialises the values.
+
+    The cache is never the source of truth: when Valkey is down, unreachable or slow, a read
+    is a miss and a write or delete is skipped, logged once per call as `cache.unavailable`.
+    """
+
+    def __init__(self, client: Redis, *, default_ttl_seconds: int) -> None:
+        self._client = client
+        self._default_ttl_seconds = default_ttl_seconds
+
+    async def get(self, key: str) -> bytes | None:
+        try:
+            value = await self._client.get(key)
+        except _UNAVAILABLE as exc:
+            _logger.warning("cache.unavailable", operation="get", error=repr(exc))
+            return None
+        # The client is built without `decode_responses`, so values come back as bytes.
+        return cast("bytes | None", value)
+
+    async def set(self, key: str, value: bytes, ttl_seconds: int | None = None) -> None:
+        """Store `value` for `ttl_seconds` (default: `CACHE__DEFAULT_TTL_SECONDS`)."""
+        ttl = self._default_ttl_seconds if ttl_seconds is None else ttl_seconds
+        try:
+            await self._client.set(key, value, ex=ttl)
+        except _UNAVAILABLE as exc:
+            _logger.warning("cache.unavailable", operation="set", error=repr(exc))
+
+    async def delete(self, key: str) -> None:
+        try:
+            await self._client.delete(key)
+        except _UNAVAILABLE as exc:
+            _logger.warning("cache.unavailable", operation="delete", error=repr(exc))

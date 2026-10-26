@@ -24,6 +24,10 @@ dependencies = [
     "alembic>=1.20.1",
     "opentelemetry-instrumentation-sqlalchemy>=0.66b1",
 {%- endif %}
+{%- if with_cache %}
+    "redis>=8.1",
+    "opentelemetry-instrumentation-redis>=0.66b1",
+{%- endif %}
 ]
 
 [project.scripts]
@@ -38,8 +42,12 @@ dev = [
     "pyright>=1.1.414",
     "import-linter>=2.15",
     "pre-commit>=4.7",
-{%- if with_database %}
+{%- if with_database and with_cache %}
+    "testcontainers[postgres,valkey]>=4.15",
+{%- elif with_database %}
     "testcontainers[postgres]>=4.15",
+{%- elif with_cache %}
+    "testcontainers[valkey]>=4.15",
 {%- endif %}
 ]
 

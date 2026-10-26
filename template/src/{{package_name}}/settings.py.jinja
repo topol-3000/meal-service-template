@@ -1,12 +1,14 @@
 from functools import lru_cache
 from typing import Literal
 
-{% if with_database -%}
+{% if with_database or with_cache -%}
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+{%- if with_database %}
     NonNegativeInt,
+{%- endif %}
     PositiveFloat,
     PositiveInt,
     SecretStr,
@@ -48,6 +50,28 @@ class DatabaseSettings(BaseModel):
 
 
 {% endif -%}
+{% if with_cache -%}
+class CacheSettings(BaseModel):
+    """Valkey cache (`infrastructure/cache/`). Env: `CACHE__<FIELD>`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    # redis://[:password@]host:6379/0, or rediss://... for TLS
+    url: SecretStr
+    default_ttl_seconds: PositiveInt = 300
+    # Short: a cache slower than this saves nothing, and a timeout only costs a miss.
+    connect_timeout_seconds: PositiveFloat = 0.5
+    timeout_seconds: PositiveFloat = 0.5
+
+    @field_validator("url")
+    @classmethod
+    def _uses_redis_scheme(cls, url: SecretStr) -> SecretStr:
+        if not url.get_secret_value().startswith(("redis://", "rediss://")):
+            raise ValueError("must start with redis:// or rediss://")
+        return url
+
+
+{% endif -%}
 class Settings(BaseSettings):
     """Service configuration, read from environment variables and `.env`.
 
@@ -55,6 +79,8 @@ class Settings(BaseSettings):
     (`HTTP_CLIENT__TIMEOUT_SECONDS=5`), and receives only that slice in `__init__`.
 {%- if with_database %}
     Secrets are `SecretStr` fields in a sub-model, like `DatabaseSettings.url` (`DB__URL`).
+{%- elif with_cache %}
+    Secrets are `SecretStr` fields in a sub-model, like `CacheSettings.url` (`CACHE__URL`).
 {%- else %}
     Secrets are `SecretStr` fields in a sub-model, for example `api_key: SecretStr` in an
     `LlmSettings` read from `LLM__API_KEY`.
@@ -93,12 +119,16 @@ class Settings(BaseSettings):
     # Required: the service does not start without DB__URL.
     db: DatabaseSettings
 {%- endif %}
+{%- if with_cache %}
+    # Required too, but the service starts and serves requests while Valkey is down.
+    cache: CacheSettings
+{%- endif %}
 
 
 @lru_cache
 def get_settings() -> Settings:
-{%- if with_database %}
-    # Required fields (`db`) come from the environment, which pyright can't see.
+{%- if with_database or with_cache %}
+    # Required fields ({{ ((["`db`"] if with_database else []) + (["`cache`"] if with_cache else [])) | join(", ") }}) come from the environment, which pyright can't see.
     return Settings()  # pyright: ignore[reportCallIssue]
 {%- else %}
     return Settings()

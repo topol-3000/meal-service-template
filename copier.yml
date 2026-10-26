@@ -6,10 +6,13 @@ _min_copier_version: "9.4"
 _subdirectory: template
 _answers_file: .copier-answers.yml
 _templates_suffix: .jinja
-# Files that exist only with the database (D6). Shared files use `{% if with_database %}`.
+# Files that exist only with the database (D6) or the cache (D10). Shared files use
+# `{% if with_database %}` / `{% if with_cache %}` blocks.
 _exclude:
   - "{% if not with_database %}src/{{ package_name }}/infrastructure/db{% endif %}"
   - "{% if not with_database %}tests/infrastructure/db{% endif %}"
+  - "{% if not with_cache %}src/{{ package_name }}/infrastructure/cache{% endif %}"
+  - "{% if not with_cache %}tests/infrastructure/cache{% endif %}"
 
 _tasks:
   - command: uv lock
@@ -58,6 +61,13 @@ with_database:
   type: bool
   help: PostgreSQL via SQLAlchemy async + asyncpg + Alembic (engine, sessions, migrations)
   default: true
+
+with_cache:
+  type: bool
+  help: >-
+    Valkey cache via redis-py (client, ValkeyCache adapter, traced commands); optional at
+    runtime: the service keeps serving while Valkey is down
+  default: false
 
 python_version:
   type: str

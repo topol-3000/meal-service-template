@@ -18,8 +18,10 @@ from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogR
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-{%- if with_database %}
+{%- if with_database or with_cache %}
 from pydantic import SecretStr
+{%- endif %}
+{%- if with_database %}
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 from testcontainers.community.postgres import PostgresContainer
 {%- endif %}
@@ -30,7 +32,7 @@ from {{ package_name }}.infrastructure.db.migrate import alembic_config as make_
 from {{ package_name }}.infrastructure.db.migrate import upgrade_to_head
 {% endif -%}
 from {{ package_name }}.main import create_app
-from {{ package_name }}.settings import {% if with_database %}DatabaseSettings, {% endif %}Settings
+from {{ package_name }}.settings import {% if with_cache %}CacheSettings, {% endif %}{% if with_database %}DatabaseSettings, {% endif %}Settings
 
 # OTel global providers can be set only once per process: install in-memory ones
 # for the whole test session and clear them between tests.
@@ -53,17 +55,27 @@ POSTGRES_IMAGE = "postgres:18-alpine"
 # Nothing listens there: unit tests that reach the database fail at once instead of hanging.
 UNIT_TEST_DATABASE_URL = "postgresql+asyncpg://test:test@127.0.0.1:1/test"
 {%- endif %}
+{%- if with_cache %}
+
+# Nothing listens there: unit tests run with Valkey down, where every lookup is a miss.
+UNIT_TEST_CACHE_URL = "redis://127.0.0.1:1/0"
+{%- endif %}
 
 
 @pytest.fixture
 def settings() -> Settings:
     # otel_enabled=False: keep the in-memory providers above instead of OTLP exporters.
-{%- if with_database %}
+{%- if with_database or with_cache %}
     return Settings(
         environment="test",
         log_format="json",
         otel_enabled=False,
+{%- if with_database %}
         db=DatabaseSettings(url=SecretStr(UNIT_TEST_DATABASE_URL)),
+{%- endif %}
+{%- if with_cache %}
+        cache=CacheSettings(url=SecretStr(UNIT_TEST_CACHE_URL)),
+{%- endif %}
     )
 {%- else %}
     return Settings(environment="test", log_format="json", otel_enabled=False)
