@@ -37,6 +37,7 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 | D7 | Integration-test database | `testcontainers[postgres]`: self-contained, one container per test session. Tests are marked `@pytest.mark.integration` and run in CI (Docker is available on GitHub runners). `make test` runs everything; `make test-unit` skips `integration`. |
 | D8 | Security scanning | Trivy in the template CI, a cleaned-up version of the boilerplate's workflow (see 6.1). |
 | D9 | Auth | Out of scope for the template for now. No auth code, docs or library choice in this plan; it gets its own plan when the first service needs it. |
+| D10 | Event bus | Valkey server (BSD-3, Linux Foundation; Streams are all we use, Redis 8 extras aren't needed). Client is redis-py `redis.asyncio`, traced by `opentelemetry-instrumentation-redis`. Not valkey-py (no OTel instrumentation, slow releases) and not Valkey GLIDE (its Python OTel exports separately and can't attach spans to the app's trace). All Valkey calls go through one adapter in `infrastructure/` so the client can be swapped in one file. Revisit when GLIDE's Python client accepts a parent span context, or if redis-py stops working with Valkey. |
 
 ### Open questions
 
@@ -167,11 +168,11 @@ docs/
 
 - [ ] **1.9 `docs/stack.md`.**
   - [ ] Approved: FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx2,
-        OpenTelemetry, SQLAlchemy 2 async + asyncpg + Alembic, Redis (`redis.asyncio`) for
-        streams, pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
+        OpenTelemetry, SQLAlchemy 2 async + asyncpg + Alembic, Valkey via redis-py
+        (`redis.asyncio`) for Streams (D10), pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
   - [ ] Banned, with replacements: `requests`/`aiohttp`/`httpx` → httpx2 (Pydantic-maintained successor of httpx); Tortoise → SQLAlchemy;
         `dependency-injector`, `fastapi-class`, `fastapi-utils` → plain FastAPI DI;
-        Celery → Redis Streams events; Poetry/pip → uv; `logging.getLogger`/`print` →
+        `valkey`/`valkey-glide` → redis-py (D10); Celery → Redis Streams events; Poetry/pip → uv; `logging.getLogger`/`print` →
         observability helpers. Auth libraries are not listed (D9).
   - [ ] Rule: a new runtime dependency needs approval (already in AGENTS.md) and an entry here.
 
@@ -265,7 +266,7 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 - [ ] **8.1** Update the template repo's `AGENTS.md` / `README.md` (new docs, new Copier question).
 - [ ] **8.2** Tag `v0.2.0`; tag message lists breaking changes and steps for existing services
       (new dev dependency, `make check` now includes imports, new settings layout).
-- [ ] **8.3** Record the decisions D1–D9 as ADRs in meal-platform `docs/adr/`.
+- [ ] **8.3** Record the decisions D1–D10 as ADRs in meal-platform `docs/adr/`.
 
 ## Progress log
 
@@ -274,3 +275,4 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 | 2026-10-26 | Plan drafted; decisions D1–D5 agreed. |
 | 2026-10-26 | Q1–Q4 answered → D6 (DB opt-in), D7 (testcontainers), D8 (Trivy), D9 (auth out of scope). |
 | 2026-10-26 | httpx replaced by httpx2 in the template (OTel httpx instrumentation supports it since 0.66b1). |
+| 2026-10-26 | D10 agreed: Valkey server, redis-py client. |
