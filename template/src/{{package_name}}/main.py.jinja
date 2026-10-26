@@ -1,0 +1,39 @@
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from {{ package_name }}.api import health
+from {{ package_name }}.observability import (
+    RequestLoggingMiddleware,
+    configure_logging,
+    get_logger,
+    instrument_app,
+    setup_telemetry,
+)
+from {{ package_name }}.settings import Settings, get_settings
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    telemetry = setup_telemetry(settings)
+    configure_logging(settings)
+    logger = get_logger(__name__)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
+        logger.info("service.started", version=settings.service_version)
+        yield
+        logger.info("service.stopping")
+        telemetry.shutdown()
+
+    app = FastAPI(
+        title=settings.service_name,
+        version=settings.service_version,
+        lifespan=lifespan,
+    )
+    app.state.settings = settings
+    app.add_middleware(RequestLoggingMiddleware)
+    app.include_router(health.router)
+    instrument_app(app)
+    return app

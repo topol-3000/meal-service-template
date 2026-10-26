@@ -1,0 +1,31 @@
+---
+name: add-endpoint
+description: Add an HTTP endpoint to this service following the layering, tracing and testing rules. Use when asked to add or change a REST endpoint.
+---
+
+# Add an HTTP endpoint
+
+1. **Domain first.** If the endpoint needs new concepts, add entities/value objects and a port
+   (`typing.Protocol`) in `src/{{ package_name }}/domain/`. No framework imports there.
+2. **Use case.** Add `src/{{ package_name }}/application/<verb>_<noun>.py` with one class or
+   function that takes its ports as constructor/function arguments. Wrap the body in a span:
+   ```python
+   tracer = get_tracer(__name__)
+   logger = get_logger(__name__)
+
+
+   async def import_recipe(url: str, importer: RecipeImporter) -> Recipe:
+       with tracer.start_as_current_span("recipe.import") as span:
+           span.set_attribute("recipe.url", url)
+           recipe = await importer.fetch(url)
+           logger.info("recipe.imported", recipe_id=str(recipe.id))
+           return recipe
+   ```
+3. **Unit test the use case** in `tests/application/` with an in-memory fake for each port.
+4. **Router.** Add or extend a module in `src/{{ package_name }}/api/`. Request and response
+   are Pydantic models defined next to the router, never domain objects directly.
+   Map domain errors to `HTTPException` here. Include the router in `main.py`.
+5. **API test** with the `client` fixture: happy path plus one error case.
+6. **Contract.** If the API is used by another service, update the OpenAPI copy in
+   meal-platform `contracts/openapi/{{ service_name }}.yaml` (`/openapi.json` of the running app).
+7. Run `make check`.

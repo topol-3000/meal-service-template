@@ -1,0 +1,40 @@
+.DEFAULT_GOAL := help
+IMAGE ?= {{ service_name }}:dev
+
+.PHONY: help install lint fmt typecheck test check run docker-build docker-run update-template
+
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
+
+install: ## Install dependencies and pre-commit hooks
+	uv sync
+	uv run pre-commit install
+
+lint: ## Ruff lint and format check
+	uv run ruff check .
+	uv run ruff format --check .
+
+fmt: ## Auto-fix lint and format
+	uv run ruff check --fix .
+	uv run ruff format .
+
+typecheck: ## Pyright (strict)
+	uv run pyright
+
+test: ## Pytest with coverage
+	uv run pytest --cov --cov-report=term
+
+check: lint typecheck test ## Everything CI runs
+
+run: ## Run locally with reload (needs .env, see .env.example)
+	uv run --env-file .env uvicorn {{ package_name }}.main:create_app --factory --reload --port {{ http_port }} --no-access-log
+
+docker-build: ## Build the image
+	docker build -t $(IMAGE) .
+
+docker-run: docker-build ## Run the image against meal-platform on localhost
+	docker run --rm -p {{ http_port }}:{{ http_port }} --network meal-platform \
+		-e OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 $(IMAGE)
+
+update-template: ## Pull changes from meal-service-template
+	uvx copier update --trust --skip-answered

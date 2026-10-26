@@ -1,0 +1,25 @@
+"""Logging, tracing and metrics. Everything the rest of the service needs is exported here."""
+
+from {{ package_name }}.observability.logs import configure_logging, get_logger
+from {{ package_name }}.observability.middleware import RequestLoggingMiddleware
+from {{ package_name }}.observability.propagation import extract_trace_context, inject_trace_context
+from {{ package_name }}.observability.telemetry import (
+    Telemetry,
+    get_meter,
+    get_tracer,
+    instrument_app,
+    setup_telemetry,
+)
+
+__all__ = [
+    "RequestLoggingMiddleware",
+    "Telemetry",
+    "configure_logging",
+    "extract_trace_context",
+    "get_logger",
+    "get_meter",
+    "get_tracer",
+    "inject_trace_context",
+    "instrument_app",
+    "setup_telemetry",
+]

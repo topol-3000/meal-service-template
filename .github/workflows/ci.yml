@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  generate-and-check:
+    # Render the template and run the generated service's full check, like a real service would.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # copier needs tags/history to render
+      - uses: astral-sh/setup-uv@v10
+      - name: Render template
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+          uvx copier copy --trust --defaults --vcs-ref HEAD \
+            -d service_name=meal-sample -d python_version=${{ matrix.python }} \
+            . "$RUNNER_TEMP/meal-sample"
+      - name: make check
+        working-directory: ${{ runner.temp }}/meal-sample
+        run: |
+          uv sync --locked
+          make check
+      - name: pre-commit
+        working-directory: ${{ runner.temp }}/meal-sample
+        run: |
+          git add -A
+          uv run pre-commit run --all-files
+      - name: Docker image builds
+        working-directory: ${{ runner.temp }}/meal-sample
+        run: docker build -t meal-sample:ci .
