@@ -76,7 +76,7 @@ ignore = [
 "typing.Dict".msg = "Use the built-in `dict`"
 
 [tool.pyright]
-include = ["src", "tests"{% if with_database %}, "migrations"{% endif %}]
+include = ["src", "tests"]
 pythonVersion = "{{ python_version }}"
 typeCheckingMode = "strict"
 venvPath = "."
@@ -119,8 +119,9 @@ markers = ["integration: needs Docker (testcontainers); `make test-unit` skips t
 
 {% if with_database -%}
 [tool.alembic]
-# `make migrate` / `make migration name=...`; env.py reads DB__URL through Settings.
-script_location = "%(here)s/migrations"
+# For the `alembic` CLI (`make migration name=...`); `python -m {{ package_name }} migrate`
+# builds the same config in infrastructure/db/migrate.py.
+script_location = "{{ package_name }}.infrastructure.db:migrations"
 file_template = "%%(year)d_%%(month).2d_%%(day).2d_%%(hour).2d%%(minute).2d_%%(rev)s_%%(slug)s"
 
 [[tool.alembic.post_write_hooks]]

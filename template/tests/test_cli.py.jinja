@@ -1,0 +1,49 @@
+import pytest
+import uvicorn
+
+from {{ package_name }}.__main__ import main
+from {{ package_name }}.settings import Settings
+
+
+@pytest.fixture
+def uvicorn_runs(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> list[str]:
+    """App paths passed to `uvicorn.run`; settings come from the `settings` fixture."""
+    runs: list[str] = []
+
+    def run(app: str, **_: object) -> None:
+        runs.append(app)
+
+    monkeypatch.setattr(uvicorn, "run", run)
+    monkeypatch.setattr("{{ package_name }}.__main__.get_settings", lambda: settings)
+    return runs
+
+
+def test_default_command_serves_the_app_factory(uvicorn_runs: list[str]) -> None:
+{%- if with_database %}
+    main([])
+{%- else %}
+    main()
+{%- endif %}
+
+    assert uvicorn_runs == ["{{ package_name }}.main:create_app"]
+{%- if with_database %}
+
+
+def test_migrate_command_upgrades_the_configured_database(
+    uvicorn_runs: list[str], settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upgraded: list[str] = []
+    monkeypatch.setattr("{{ package_name }}.__main__.upgrade_to_head", upgraded.append)
+
+    main(["migrate"])
+
+    assert upgraded == [settings.db.url.get_secret_value()]
+    assert uvicorn_runs == []
+
+
+def test_unknown_command_is_rejected(uvicorn_runs: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["deploy"])
+
+    assert uvicorn_runs == []
+{%- endif %}

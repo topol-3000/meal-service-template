@@ -1,0 +1,36 @@
+import asyncio
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from {{ package_name }}.infrastructure.db.migrate import LOCK_KEY, upgrade_to_head
+
+pytestmark = pytest.mark.integration
+
+
+def test_models_match_migrations(alembic_config: Config) -> None:
+    """Fails when a model changed without a migration: run `make migration name=...`."""
+    command.check(alembic_config)
+
+
+def test_migrations_downgrade_and_upgrade_again(alembic_config: Config) -> None:
+    command.downgrade(alembic_config, "base")
+    command.upgrade(alembic_config, "head")
+
+
+async def test_migration_waits_while_another_run_holds_the_lock(
+    db_connection: AsyncConnection, database_url: str
+) -> None:
+    lock = {"key": LOCK_KEY}
+    await db_connection.execute(text("SELECT pg_advisory_lock(:key)"), lock)
+    # A thread: Alembic runs its own event loop.
+    upgrade = asyncio.create_task(asyncio.to_thread(upgrade_to_head, database_url))
+
+    await asyncio.sleep(0.5)
+    assert not upgrade.done()
+
+    await db_connection.execute(text("SELECT pg_advisory_unlock(:key)"), lock)
+    await asyncio.wait_for(upgrade, timeout=10)

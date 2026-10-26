@@ -36,8 +36,8 @@ run: ## Run locally with reload (needs .env, see .env.example)
 	uv run --env-file .env uvicorn {{ package_name }}.main:create_app --factory --reload --port {{ http_port }} --no-access-log
 {%- if with_database %}
 
-migrate: ## Apply database migrations (DB__URL from .env or the environment)
-	uv run alembic upgrade head
+migrate: ## Apply database migrations, as the deploy job does (DB__URL from .env)
+	uv run python -m {{ package_name }} migrate
 
 migration: ## New migration from model changes: make migration name=add_recipes
 	@test -n "$(name)" || { echo "usage: make migration name=add_recipes"; exit 1; }

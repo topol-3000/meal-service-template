@@ -1,0 +1,28 @@
+"""Database migrations (Alembic).
+
+The scripts live in `migrations/` next to this module, so they ship inside the package and
+the service image runs them with `python -m {{ package_name }} migrate`, as a one-off job
+before a new version starts. `make migration name=...` creates new ones
+(`[tool.alembic]` in pyproject.toml).
+"""
+
+import zlib
+
+from alembic import command
+from alembic.config import Config
+
+SCRIPT_LOCATION = "{{ package_name }}.infrastructure.db:migrations"
+# PostgreSQL advisory lock held while migrating: concurrent runs (two deploys, a retried
+# job) wait for each other instead of racing.
+LOCK_KEY = zlib.crc32(b"{{ service_name }}.migrations")
+
+
+def alembic_config(database_url: str) -> Config:
+    config = Config()
+    config.set_main_option("script_location", SCRIPT_LOCATION)
+    config.attributes["database_url"] = database_url
+    return config
+
+
+def upgrade_to_head(database_url: str) -> None:
+    command.upgrade(alembic_config(database_url), "head")

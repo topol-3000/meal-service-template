@@ -10,7 +10,6 @@ _templates_suffix: .jinja
 _exclude:
   - "{% if not with_database %}src/{{ package_name }}/infrastructure/db{% endif %}"
   - "{% if not with_database %}tests/infrastructure/db{% endif %}"
-  - "{% if not with_database %}migrations{% endif %}"
 
 _tasks:
   - command: uv lock

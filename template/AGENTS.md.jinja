@@ -20,7 +20,7 @@ read its `AGENTS.md` before changing anything that crosses a service boundary.
 | Tests | `make test` or `uv run pytest tests/test_x.py -k name` |
 | Tests without `integration` ones{% if with_database %} (no Docker){% endif %} | `make test-unit` |
 {%- if with_database %}
-| Apply migrations | `make migrate` (`DB__URL` from `.env`) |
+| Apply migrations | `make migrate` (`DB__URL` from `.env`; deploys run `python -m {{ package_name }} migrate`) |
 | New migration from models | `make migration name=add_recipes`, then review the file |
 {%- endif %}
 | Run locally | `cp .env.example .env && make run` → http://localhost:{{ http_port }}/docs |
@@ -37,15 +37,12 @@ src/{{ package_name }}/
   application/     use cases: one module per use case, depends on domain only
   infrastructure/  adapters implementing ports: DB, Redis Streams, HTTP clients, LLM
 {%- if with_database %}
-    db/            engine, session factory, ORM `Base` (models.py), repositories
+    db/            engine, sessions, ORM `Base` (models.py), repositories, migrations/
 {%- endif %}
   api/             FastAPI routers and request/response schemas
   observability/   logging, tracing, metrics, trace propagation (do not bypass)
   settings.py      pydantic-settings, env vars only
   main.py          composition root: create_app() wires everything together
-{%- if with_database %}
-migrations/        Alembic (async env.py, config in pyproject.toml `[tool.alembic]`)
-{%- endif %}
 tests/             mirrors src/; unit tests for domain/application, API tests via TestClient
 ```
 
@@ -59,6 +56,8 @@ Dependency direction: `api → application → domain ← infrastructure`.
 - Database access goes through repositories in `infrastructure/db/` that take the request's
   `DbSessionDep` session: one transaction per request, committed when the route returns and
   rolled back when it raises. Repositories never commit. Tables change only via migrations.
+- Migrations run as a one-off job before the new version starts, while the old one still
+  serves: they must work with both (add first; drop or rename in a later release).
 {%- endif %}
 - The LLM is just another port (`domain`) with an Ollama adapter (`infrastructure`).
   LLM output is always parsed into a Pydantic model; never pass raw LLM text into the domain.
