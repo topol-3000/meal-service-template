@@ -1,0 +1,115 @@
+"""One place that turns exceptions into HTTP responses (RFC 9457 problem details).
+
+Routes never catch domain errors to map them; they let them propagate to these handlers.
+"""
+
+from collections.abc import Callable, Mapping
+from http import HTTPStatus
+from typing import cast
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
+
+from {{ package_name }}.api.schemas import ApiModel
+from {{ package_name }}.domain import errors
+from {{ package_name }}.observability import get_logger
+
+PROBLEM_JSON = "application/problem+json"
+
+# Starlette picks the handler of the closest registered base class,
+# so `RecipeNotFoundError(NotFoundError)` becomes a 404 without extra code.
+_DOMAIN_ERROR_STATUS: dict[type[errors.DomainError], HTTPStatus] = {
+    errors.DomainError: HTTPStatus.BAD_REQUEST,
+    errors.NotFoundError: HTTPStatus.NOT_FOUND,
+    errors.ConflictError: HTTPStatus.CONFLICT,
+    errors.ValidationError: HTTPStatus.UNPROCESSABLE_ENTITY,
+    errors.ExternalServiceError: HTTPStatus.BAD_GATEWAY,
+}
+
+_logger = get_logger(__name__)
+
+
+class FieldError(ApiModel):
+    loc: list[str | int]
+    msg: str
+
+
+class ProblemDetails(ApiModel):
+    """Body of every error response."""
+
+    type: str = "about:blank"
+    title: str
+    status: int
+    detail: str | None = None
+    instance: str | None = None
+    errors: list[FieldError] | None = None
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    # Starlette types every handler as taking `Exception`; each handler below is registered
+    # for one exception type only, so it may `cast` to that type.
+    for error_type, status in _DOMAIN_ERROR_STATUS.items():
+        app.add_exception_handler(error_type, _domain_error_handler(status))
+    app.add_exception_handler(RequestValidationError, _request_validation_handler)
+    app.add_exception_handler(HTTPException, _http_exception_handler)
+    app.add_exception_handler(Exception, _unhandled_error_handler)
+
+
+def _domain_error_handler(status: HTTPStatus) -> Callable[[Request, Exception], JSONResponse]:
+    def handle(request: Request, exc: Exception) -> JSONResponse:
+        # Logged here and nowhere else; the request line comes from RequestLoggingMiddleware.
+        log = _logger.warning if status >= HTTPStatus.INTERNAL_SERVER_ERROR else _logger.info
+        log("http.domain_error", error_type=type(exc).__name__, http_status=int(status))
+        return _problem(request, status, detail=str(exc) or None)
+
+    return handle
+
+
+def _request_validation_handler(request: Request, exc: Exception) -> JSONResponse:
+    validation_error = cast(RequestValidationError, exc)
+    # The submitted values are left out on purpose: they may contain secrets.
+    field_errors = [FieldError(loc=list(e["loc"]), msg=e["msg"]) for e in validation_error.errors()]
+    return _problem(
+        request,
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        detail="Request validation failed",
+        errors=field_errors,
+    )
+
+
+def _http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    http_exception = cast(HTTPException, exc)
+    status = HTTPStatus(http_exception.status_code)
+    detail = http_exception.detail if http_exception.detail != status.phrase else None
+    return _problem(request, status, detail=detail, headers=http_exception.headers)
+
+
+def _unhandled_error_handler(request: Request, _: Exception) -> JSONResponse:
+    # No logging here: the server logs the traceback after this response is sent,
+    # and the exception is recorded on the request span.
+    return _problem(request, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+
+def _problem(
+    request: Request,
+    status: HTTPStatus,
+    *,
+    detail: str | None = None,
+    errors: list[FieldError] | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    problem = ProblemDetails(
+        title=status.phrase,
+        status=status,
+        detail=detail,
+        instance=request.url.path,
+        errors=errors,
+    )
+    return JSONResponse(
+        problem.model_dump(mode="json", exclude_none=True),
+        status_code=status,
+        headers=headers,
+        media_type=PROBLEM_JSON,
+    )

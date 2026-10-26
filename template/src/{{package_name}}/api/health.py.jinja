@@ -1,0 +1,55 @@
+from http import HTTPStatus
+from typing import Literal
+
+from fastapi import APIRouter, Response
+from pydantic import Field
+
+from {{ package_name }}.api.dependencies import AppStateDep, ReadinessCheck, SettingsDep
+from {{ package_name }}.api.schemas import ApiModel
+from {{ package_name }}.observability import get_logger
+
+router = APIRouter(prefix="/health", tags=["health"])
+_logger = get_logger(__name__)
+
+type CheckResult = Literal["ok", "failed"]
+
+
+class HealthResponse(ApiModel):
+    status: Literal["ok", "unavailable"]
+    service: str
+    version: str
+    checks: dict[str, CheckResult] = Field(default_factory=dict[str, CheckResult])
+
+
+@router.get("/live")
+async def live(settings: SettingsDep) -> HealthResponse:
+    return HealthResponse(
+        status="ok", service=settings.service_name, version=settings.service_version
+    )
+
+
+@router.get("/ready")
+async def ready(state: AppStateDep, response: Response) -> HealthResponse:
+    """Ready when every resource in `AppState.readiness_checks` answers; 503 otherwise."""
+    checks: dict[str, CheckResult] = {
+        name: await _run(name, check) for name, check in state.readiness_checks.items()
+    }
+    is_ready = all(result == "ok" for result in checks.values())
+    if not is_ready:
+        response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+    return HealthResponse(
+        status="ok" if is_ready else "unavailable",
+        service=state.settings.service_name,
+        version=state.settings.service_version,
+        checks=checks,
+    )
+
+
+async def _run(name: str, check: ReadinessCheck) -> CheckResult:
+    try:
+        await check()
+    # Any failure means "not ready"; the probe must answer, not crash.
+    except Exception as exc:
+        _logger.warning("health.check_failed", check=name, error=repr(exc))
+        return "failed"
+    return "ok"

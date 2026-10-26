@@ -1,0 +1,49 @@
+"""How routes get what they need: typed providers over the state opened in the lifespan.
+
+Routes declare dependencies with the aliases below (`settings: SettingsDep`), never by
+reading `request.app.state` themselves. Tests replace a provider through
+`app.dependency_overrides[get_app_state]`.
+"""
+
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Annotated
+
+import httpx2
+from fastapi import Depends, Request
+
+from {{ package_name }}.settings import Settings
+
+# Raises when the resource is unavailable (e.g. a database ping).
+type ReadinessCheck = Callable[[], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class AppState:
+    """Resources opened in the lifespan (`main.py`), stored on `app.state.app_state`."""
+
+    settings: Settings
+    http_client: httpx2.AsyncClient
+    # Checked by `/health/ready`, keyed by resource name.
+    readiness_checks: Mapping[str, ReadinessCheck] = field(
+        default_factory=dict[str, ReadinessCheck]
+    )
+
+
+def get_app_state(request: Request) -> AppState:
+    return request.app.state.app_state
+
+
+type AppStateDep = Annotated[AppState, Depends(get_app_state)]
+
+
+def get_app_settings(state: AppStateDep) -> Settings:
+    return state.settings
+
+
+def get_http_client(state: AppStateDep) -> httpx2.AsyncClient:
+    return state.http_client
+
+
+type SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+type HttpClientDep = Annotated[httpx2.AsyncClient, Depends(get_http_client)]

@@ -37,6 +37,7 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 | D7 | Integration-test database | `testcontainers[postgres]`: self-contained, one container per test session. Tests are marked `@pytest.mark.integration` and run in CI (Docker is available on GitHub runners). `make test` runs everything; `make test-unit` skips `integration`. |
 | D8 | Security scanning | Trivy in the template CI, a cleaned-up version of the boilerplate's workflow (see 6.1). |
 | D9 | Auth | Out of scope for the template for now. No auth code, docs or library choice in this plan; it gets its own plan when the first service needs it. |
+| D10 | Event bus | Valkey server (BSD-3, Linux Foundation; Streams are all we use, Redis 8 extras aren't needed). Client is redis-py `redis.asyncio`, traced by `opentelemetry-instrumentation-redis`. Not valkey-py (no OTel instrumentation, slow releases) and not Valkey GLIDE (its Python OTel exports separately and can't attach spans to the app's trace). All Valkey calls go through one adapter in `infrastructure/` so the client can be swapped in one file. Revisit when GLIDE's Python client accepts a parent span context, or if redis-py stops working with Valkey. |
 
 ### Open questions
 
@@ -167,40 +168,49 @@ docs/
 
 - [ ] **1.9 `docs/stack.md`.**
   - [ ] Approved: FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx2,
-        OpenTelemetry, SQLAlchemy 2 async + asyncpg + Alembic, Redis (`redis.asyncio`) for
-        streams, pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
+        OpenTelemetry, SQLAlchemy 2 async + asyncpg + Alembic, Valkey via redis-py
+        (`redis.asyncio`) for Streams (D10), pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
   - [ ] Banned, with replacements: `requests`/`aiohttp`/`httpx` → httpx2 (Pydantic-maintained successor of httpx); Tortoise → SQLAlchemy;
         `dependency-injector`, `fastapi-class`, `fastapi-utils` → plain FastAPI DI;
-        Celery → Redis Streams events; Poetry/pip → uv; `logging.getLogger`/`print` →
+        `valkey`/`valkey-glide` → redis-py (D10); Celery → Redis Streams events; Poetry/pip → uv; `logging.getLogger`/`print` →
         observability helpers. Auth libraries are not listed (D9).
   - [ ] Rule: a new runtime dependency needs approval (already in AGENTS.md) and an entry here.
 
 ## Phase 2: Enforcement in tooling
 
-- [ ] **2.1 import-linter** in dev dependencies, config in `pyproject.toml.jinja`:
-  - [ ] `layers` contract: `api` → `application` → `domain`; `infrastructure` → `domain`.
-  - [ ] `forbidden` contract: `domain` and `application` must not import `fastapi`,
+- [x] **2.1 import-linter** in dev dependencies, config in `pyproject.toml.jinja`:
+  - [x] `layers` contract: `api` → `application` → `domain`; `infrastructure` → `domain`.
+        Implemented as `["api", "application | infrastructure", "domain"]`: api may import
+        infrastructure (providers build adapters), application and infrastructure never import each other.
+  - [x] `forbidden` contract: `domain` and `application` must not import `fastapi`,
         `starlette`, `sqlalchemy`, `httpx2`, `redis`, `pydantic_settings`.
-  - [ ] `forbidden`: `domain` must not import `{{ package_name }}.observability`.
-  - [ ] Add `make imports` target, include it in `make check` and pre-commit.
-- [ ] **2.2 ruff banned-api** additions: `requests`, `aiohttp`, `httpx`, `typing.Optional`, `typing.Union`,
+        Direct imports only (`allow_indirect_imports = true`): otherwise a use case could not import
+        `observability` or `settings`, which use starlette and pydantic_settings.
+  - [x] `forbidden`: `domain` must not import `{{ package_name }}.observability`.
+  - [x] Add `make imports` target, include it in `make check` and pre-commit.
+- [x] **2.2 ruff banned-api** additions: `requests`, `aiohttp`, `httpx`, `typing.Optional`, `typing.Union`,
       `typing.List`/`Dict` (in case UP misses them), `print` is already covered by `T20`.
-- [ ] **2.3 Template CI** runs each check step separately; switch it to `make check` so new
+- [x] **2.3 Template CI** runs each check step separately; switch it to `make check` so new
       checks (import-linter) can't be forgotten in CI.
-- [ ] **2.4** Make sure pyright strict passes on all new skeleton code without `# type: ignore`.
+- [x] **2.4** Make sure pyright strict passes on all new skeleton code without `# type: ignore`.
 
 ## Phase 3: Skeleton code in the template
 
 Infrastructure only, no business logic. Each file comes with a test.
 
-- [ ] **3.1** `domain/errors.py`: `DomainError` hierarchy (1.6).
-- [ ] **3.2** `api/errors.py`: exception handlers + problem-details response model; registered in `create_app()`.
-- [ ] **3.3** `api/schemas.py` (or `api/base.py`): `ApiModel` base class (1.4).
-- [ ] **3.4** `main.py`: lifespan with `AsyncExitStack`; typed app-state object holding resources.
-- [ ] **3.5** `api/dependencies.py`: providers for settings and resources, `Annotated` aliases.
-- [ ] **3.6** `settings.py`: nested sub-model pattern (`env_nested_delimiter="__"`), `SecretStr` example.
-- [ ] **3.7** Shared `infrastructure/http.py`: one lifespan-managed `httpx2.AsyncClient`
+- [x] **3.1** `domain/errors.py`: `DomainError` hierarchy (1.6).
+- [x] **3.2** `api/errors.py`: exception handlers + problem-details response model; registered in `create_app()`.
+- [x] **3.3** `api/schemas.py`: `ApiModel` base class (1.4).
+- [x] **3.4** `main.py`: lifespan with `AsyncExitStack`; typed app-state object holding resources.
+      `AppState` is defined in `api/dependencies.py` (in `main.py` it would be a circular import)
+      and stored on `app.state.app_state`.
+- [x] **3.5** `api/dependencies.py`: providers for settings and resources, `Annotated` aliases.
+- [x] **3.6** `settings.py`: nested sub-model pattern (`env_nested_delimiter="__"`), `SecretStr` example.
+      `HttpClientSettings` (`HTTP_CLIENT__*`) is the sub-model; `SecretStr` is shown in the `Settings`
+      docstring only, since there is no secret until `DB__URL` (3.9).
+- [x] **3.7** Shared `infrastructure/http.py`: one lifespan-managed `httpx2.AsyncClient`
       factory (timeouts, instrumentation) instead of per-call clients.
+      Tracing stays global (`instrument_app`), so httpx2 clients inside libraries are traced too.
 - [ ] **3.8** Copier question `with_database` in `copier.yml` (D6); conditional dependencies
       in `pyproject.toml.jinja`, conditional `.env.example` entries, and `_exclude` rules so
       DB files aren't rendered when it's false.
@@ -208,7 +218,7 @@ Infrastructure only, no business logic. Each file comes with a test.
       wired to settings, readiness check, `make migrate` / `make migration name=...` targets.
 - [ ] **3.10** (`with_database`) testcontainers fixtures in `tests/conftest.py`, `integration`
       marker registered in pytest config, `make test-unit` target (D7).
-- [ ] **3.11** Tests: error-mapping test, lifespan open/close test, readiness test, settings parsing test.
+- [x] **3.11** Tests: error-mapping test, lifespan open/close test, readiness test, settings parsing test.
 
 ## Phase 4: Port useful parts of the boilerplate
 
@@ -265,7 +275,7 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 - [ ] **8.1** Update the template repo's `AGENTS.md` / `README.md` (new docs, new Copier question).
 - [ ] **8.2** Tag `v0.2.0`; tag message lists breaking changes and steps for existing services
       (new dev dependency, `make check` now includes imports, new settings layout).
-- [ ] **8.3** Record the decisions D1–D9 as ADRs in meal-platform `docs/adr/`.
+- [ ] **8.3** Record the decisions D1–D10 as ADRs in meal-platform `docs/adr/`.
 
 ## Progress log
 
@@ -274,3 +284,5 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 | 2026-10-26 | Plan drafted; decisions D1–D5 agreed. |
 | 2026-10-26 | Q1–Q4 answered → D6 (DB opt-in), D7 (testcontainers), D8 (Trivy), D9 (auth out of scope). |
 | 2026-10-26 | httpx replaced by httpx2 in the template (OTel httpx instrumentation supports it since 0.66b1). |
+| 2026-10-26 | D10 agreed: Valkey server, redis-py client. |
+| 2026-10-26 | Chunk 1 done (Phase 2, 3.1–3.7, 3.11) on branch `feat/architecture-chunk-1`: import-linter (2.15) with `make imports`, banned APIs, CI runs `make check`, error/ApiModel/AppState/settings/HTTP-client skeleton with tests. Decided while implementing: direct-imports-only forbidden contract, `AppState` in `api/dependencies.py`, `SecretStr` as docstring example, global httpx2 tracing kept. |

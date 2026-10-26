@@ -1,0 +1,16 @@
+import httpx2
+
+from {{ package_name }}.settings import HttpClientSettings
+
+
+def create_http_client(settings: HttpClientSettings) -> httpx2.AsyncClient:
+    """Build the service's one outgoing HTTP client.
+
+    It is opened once in the lifespan (`main.py`) and shared by all adapters, so connections
+    are pooled. Never create a client per call. Requests are traced by the global httpx2
+    instrumentation in `observability.instrument_app`.
+    """
+    return httpx2.AsyncClient(
+        timeout=httpx2.Timeout(settings.timeout_seconds, connect=settings.connect_timeout_seconds),
+        limits=httpx2.Limits(max_connections=settings.max_connections),
+    )
