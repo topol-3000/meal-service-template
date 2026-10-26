@@ -1,3 +1,4 @@
+import asyncio
 from http import HTTPStatus
 from typing import Literal
 
@@ -30,10 +31,16 @@ async def live(settings: SettingsDep) -> HealthResponse:
 
 @router.get("/ready")
 async def ready(state: AppStateDep, response: Response) -> HealthResponse:
-    """Ready when every resource in `AppState.readiness_checks` answers; 503 otherwise."""
-    checks: dict[str, CheckResult] = {
-        name: await _run(name, check) for name, check in state.readiness_checks.items()
-    }
+    """Ready when every resource in `AppState.readiness_checks` answers; 503 otherwise.
+
+    Checks run concurrently, each limited to `READINESS_CHECK_TIMEOUT_SECONDS`, so one slow
+    resource neither delays the others nor makes the probe itself time out.
+    """
+    limit_seconds = state.settings.readiness_check_timeout_seconds
+    results = await asyncio.gather(
+        *(_run(name, check, limit_seconds) for name, check in state.readiness_checks.items())
+    )
+    checks: dict[str, CheckResult] = dict(zip(state.readiness_checks, results, strict=True))
     is_ready = all(result == "ok" for result in checks.values())
     if not is_ready:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
@@ -45,9 +52,15 @@ async def ready(state: AppStateDep, response: Response) -> HealthResponse:
     )
 
 
-async def _run(name: str, check: ReadinessCheck) -> CheckResult:
+async def _run(name: str, check: ReadinessCheck, limit_seconds: float) -> CheckResult:
     try:
-        await check()
+        async with asyncio.timeout(limit_seconds):
+            await check()
+    except TimeoutError:
+        _logger.warning(
+            "health.check_failed", check=name, error="timeout", limit_seconds=limit_seconds
+        )
+        return "failed"
     # Any failure means "not ready"; the probe must answer, not crash.
     except Exception as exc:
         _logger.warning("health.check_failed", check=name, error=repr(exc))

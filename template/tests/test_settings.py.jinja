@@ -39,6 +39,7 @@ def test_flat_settings_keep_their_names(monkeypatch: pytest.MonkeyPatch) -> None
         ("HTTP_CLIENT__MAX_CONNECTIONS", "-1", "max_connections"),
         ("HTTP_CLIENT__TIMEOUT_SECONDS", "soon", "timeout_seconds"),
         ("LOG_LEVEL", "LOUD", "log_level"),
+        ("READINESS_CHECK_TIMEOUT_SECONDS", "0", "readiness_check_timeout_seconds"),
     ],
 )
 def test_invalid_values_are_rejected_at_startup(

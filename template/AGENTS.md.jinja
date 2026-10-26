@@ -40,7 +40,8 @@ tests/             mirrors src/; unit tests for domain/application, API tests vi
 
 Dependency direction: `api → application → domain ← infrastructure`.
 
-- `domain` imports nothing from FastAPI, SQLAlchemy, httpx2, Redis, Ollama or `observability`.
+- `domain` imports nothing from FastAPI, SQLAlchemy, httpx2, Redis, Ollama, `observability`
+  or `settings`.
 - `application` talks to the outside world only through ports defined in `domain`.
 - Wiring (which adapter implements which port) happens in `main.py` / FastAPI dependencies.
 - The LLM is just another port (`domain`) with an Ollama adapter (`infrastructure`).

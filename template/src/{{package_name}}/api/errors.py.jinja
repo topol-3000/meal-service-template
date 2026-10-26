@@ -3,13 +3,17 @@
 Routes never catch domain errors to map them; they let them propagate to these handlers.
 """
 
-from collections.abc import Callable, Mapping
+import json
+from collections.abc import Awaitable, Callable, Mapping
 from http import HTTPStatus
+from http.client import responses
 from typing import cast
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException
 
 from {{ package_name }}.api.schemas import ApiModel
@@ -27,6 +31,12 @@ _DOMAIN_ERROR_STATUS: dict[type[errors.DomainError], HTTPStatus] = {
     errors.ValidationError: HTTPStatus.UNPROCESSABLE_ENTITY,
     errors.ExternalServiceError: HTTPStatus.BAD_GATEWAY,
 }
+# Sent instead of the message of a 5xx domain error, which may describe internals
+# (hosts, upstream responses). The message itself is logged.
+SERVER_ERROR_DETAIL = "The service could not complete the request"
+
+# Async on purpose: Starlette runs sync handlers in a worker thread.
+type ExceptionHandler = Callable[[Request, Exception], Awaitable[Response]]
 
 _logger = get_logger(__name__)
 
@@ -57,17 +67,24 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(Exception, _unhandled_error_handler)
 
 
-def _domain_error_handler(status: HTTPStatus) -> Callable[[Request, Exception], JSONResponse]:
-    def handle(request: Request, exc: Exception) -> JSONResponse:
+def _domain_error_handler(status: HTTPStatus) -> ExceptionHandler:
+    async def handle(request: Request, exc: Exception) -> Response:
         # Logged here and nowhere else; the request line comes from RequestLoggingMiddleware.
-        log = _logger.warning if status >= HTTPStatus.INTERNAL_SERVER_ERROR else _logger.info
-        log("http.domain_error", error_type=type(exc).__name__, http_status=int(status))
+        if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+            _logger.warning(
+                "http.domain_error",
+                error_type=type(exc).__name__,
+                http_status=int(status),
+                error=str(exc),
+            )
+            return _problem(request, status, detail=SERVER_ERROR_DETAIL)
+        _logger.info("http.domain_error", error_type=type(exc).__name__, http_status=int(status))
         return _problem(request, status, detail=str(exc) or None)
 
     return handle
 
 
-def _request_validation_handler(request: Request, exc: Exception) -> JSONResponse:
+async def _request_validation_handler(request: Request, exc: Exception) -> Response:
     validation_error = cast(RequestValidationError, exc)
     # The submitted values are left out on purpose: they may contain secrets.
     field_errors = [FieldError(loc=list(e["loc"]), msg=e["msg"]) for e in validation_error.errors()]
@@ -79,29 +96,48 @@ def _request_validation_handler(request: Request, exc: Exception) -> JSONRespons
     )
 
 
-def _http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+async def _http_exception_handler(request: Request, exc: Exception) -> Response:
     http_exception = cast(HTTPException, exc)
-    status = HTTPStatus(http_exception.status_code)
-    detail = http_exception.detail if http_exception.detail != status.phrase else None
-    return _problem(request, status, detail=detail, headers=http_exception.headers)
+    status = http_exception.status_code
+    if not is_body_allowed_for_status_code(status):  # 1xx, 204, 304
+        return Response(status_code=status, headers=http_exception.headers)
+    return _problem(
+        request, status, detail=_http_detail(http_exception), headers=http_exception.headers
+    )
 
 
-def _unhandled_error_handler(request: Request, _: Exception) -> JSONResponse:
+def _http_detail(http_exception: HTTPException) -> str | None:
+    # FastAPI's HTTPException accepts any JSON-able detail (Starlette types it as `str`);
+    # problem details need a string.
+    detail = cast(object, http_exception.detail)
+    if not isinstance(detail, str):
+        return json.dumps(jsonable_encoder(detail))
+    return detail if detail and detail != _title(http_exception.status_code) else None
+
+
+async def _unhandled_error_handler(request: Request, _: Exception) -> Response:
     # No logging here: the server logs the traceback after this response is sent,
     # and the exception is recorded on the request span.
     return _problem(request, HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
+def _title(status: int) -> str:
+    # Status codes outside the IANA registry (499, 599, ...) have no phrase.
+    if status in responses:
+        return responses[status]
+    return "Server Error" if status >= HTTPStatus.INTERNAL_SERVER_ERROR else "Client Error"
+
+
 def _problem(
     request: Request,
-    status: HTTPStatus,
+    status: int,
     *,
     detail: str | None = None,
     errors: list[FieldError] | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     problem = ProblemDetails(
-        title=status.phrase,
+        title=_title(status),
         status=status,
         detail=detail,
         instance=request.url.path,

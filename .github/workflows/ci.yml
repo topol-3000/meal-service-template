@@ -34,6 +34,18 @@ jobs:
         run: |
           git add -A
           uv run pre-commit run --all-files
+      - name: Layer contracts reject forbidden imports
+        working-directory: ${{ runner.temp }}/meal-sample
+        run: |
+          # Each module is imported from the domain in turn; `make imports` must fail.
+          for module in meal_sample.settings; do
+            echo "import $module  # noqa: F401" > src/meal_sample/domain/_violation.py
+            if make imports; then
+              echo "::error::domain may import $module"
+              exit 1
+            fi
+          done
+          rm src/meal_sample/domain/_violation.py
       - name: Docker image builds
         working-directory: ${{ runner.temp }}/meal-sample
         run: docker build -t meal-sample:ci .

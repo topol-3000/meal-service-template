@@ -94,10 +94,10 @@ forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "httpx2", "redis", "p
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
-name = "Domain does not depend on observability"
+name = "Domain does not depend on observability or settings"
 type = "forbidden"
 source_modules = ["{{ package_name }}.domain"]
-forbidden_modules = ["{{ package_name }}.observability"]
+forbidden_modules = ["{{ package_name }}.observability", "{{ package_name }}.settings"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 
 from fastapi import FastAPI
@@ -14,10 +15,36 @@ async def _unreachable() -> None:
     raise ConnectionError("database unreachable")
 
 
-def _use_readiness_checks(app: FastAPI, checks: dict[str, ReadinessCheck]) -> None:
+async def _hangs() -> None:
+    await asyncio.Event().wait()
+
+
+def _meeting_checks() -> dict[str, ReadinessCheck]:
+    """Two checks that each wait for the other to start: they pass only if run concurrently."""
+    first_started, second_started = asyncio.Event(), asyncio.Event()
+
+    async def first() -> None:
+        first_started.set()
+        await second_started.wait()
+
+    async def second() -> None:
+        second_started.set()
+        await first_started.wait()
+
+    return {"first": first, "second": second}
+
+
+def _use_readiness_checks(
+    app: FastAPI, checks: dict[str, ReadinessCheck], *, timeout_seconds: float = 1.0
+) -> None:
     """Run /health/ready against `checks` instead of the resources the lifespan opened."""
     real_state: AppState = app.state.app_state
-    app.dependency_overrides[get_app_state] = lambda: replace(real_state, readiness_checks=checks)
+    settings = real_state.settings.model_copy(
+        update={"readiness_check_timeout_seconds": timeout_seconds}
+    )
+    app.dependency_overrides[get_app_state] = lambda: replace(
+        real_state, settings=settings, readiness_checks=checks
+    )
 
 
 def test_live_returns_ok(client: TestClient) -> None:
@@ -51,4 +78,22 @@ def test_ready_is_unavailable_when_a_check_fails(app: FastAPI, client: TestClien
 
     assert response.status_code == 503
     assert response.json()["status"] == "unavailable"
+    assert response.json()["checks"] == {"database": "failed", "cache": "ok"}
+
+
+def test_ready_runs_checks_concurrently(app: FastAPI, client: TestClient) -> None:
+    _use_readiness_checks(app, _meeting_checks())
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["checks"] == {"first": "ok", "second": "ok"}
+
+
+def test_ready_counts_a_check_over_the_timeout_as_failed(app: FastAPI, client: TestClient) -> None:
+    _use_readiness_checks(app, {"database": _hangs, "cache": _ok}, timeout_seconds=0.05)
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
     assert response.json()["checks"] == {"database": "failed", "cache": "ok"}
