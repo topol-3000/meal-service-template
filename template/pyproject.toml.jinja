@@ -29,6 +29,7 @@ dev = [
     "pytest-cov>=7.0",
     "ruff>=0.17",
     "pyright>=1.1.414",
+    "import-linter>=2.15",
     "pre-commit>=4.7",
 ]
 
@@ -56,6 +57,13 @@ ignore = [
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "logging.getLogger".msg = "Use structlog.get_logger() from {{ package_name }}.observability"
+"requests".msg = "Use httpx2 (async) through the shared client in infrastructure/http.py"
+"aiohttp".msg = "Use httpx2 through the shared client in infrastructure/http.py"
+"httpx".msg = "Use httpx2, the maintained successor of httpx"
+"typing.Optional".msg = "Use `X | None`"
+"typing.Union".msg = "Use `X | Y`"
+"typing.List".msg = "Use the built-in `list`"
+"typing.Dict".msg = "Use the built-in `dict`"
 
 [tool.pyright]
 include = ["src", "tests"]
@@ -64,6 +72,32 @@ typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
 reportMissingTypeStubs = false
+
+# Layering (see AGENTS.md). Run with `make imports`; part of `make check`.
+[tool.importlinter]
+root_package = "{{ package_name }}"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers: api -> application | infrastructure -> domain"
+type = "layers"
+containers = ["{{ package_name }}"]
+# `|`: application and infrastructure must not import each other.
+layers = ["api", "application | infrastructure", "domain"]
+
+[[tool.importlinter.contracts]]
+name = "Domain and application stay framework-free"
+type = "forbidden"
+source_modules = ["{{ package_name }}.domain", "{{ package_name }}.application"]
+forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "httpx2", "redis", "pydantic_settings"]
+# Direct imports only: use cases may import observability and settings, which use these.
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Domain does not depend on observability"
+type = "forbidden"
+source_modules = ["{{ package_name }}.domain"]
+forbidden_modules = ["{{ package_name }}.observability"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

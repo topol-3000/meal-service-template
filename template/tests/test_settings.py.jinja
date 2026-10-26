@@ -1,0 +1,50 @@
+import pytest
+from pydantic import ValidationError
+
+from {{ package_name }}.settings import Settings
+
+
+def _settings_from_env() -> Settings:
+    # `_env_file=None`: read only the environment, not a developer's local `.env`.
+    return Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+
+
+def test_nested_settings_are_read_from_double_underscore_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_CLIENT__TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("HTTP_CLIENT__MAX_CONNECTIONS", "7")
+
+    settings = _settings_from_env()
+
+    assert settings.http_client.timeout_seconds == 2.5
+    assert settings.http_client.max_connections == 7
+    assert settings.http_client.connect_timeout_seconds == 5.0
+
+
+def test_flat_settings_keep_their_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PORT", "9001")
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+    settings = _settings_from_env()
+
+    assert settings.http_port == 9001
+    assert settings.log_level == "DEBUG"
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "field"),
+    [
+        ("HTTP_CLIENT__TIMEOUT_SECONDS", "0", "timeout_seconds"),
+        ("HTTP_CLIENT__MAX_CONNECTIONS", "-1", "max_connections"),
+        ("HTTP_CLIENT__TIMEOUT_SECONDS", "soon", "timeout_seconds"),
+        ("LOG_LEVEL", "LOUD", "log_level"),
+    ],
+)
+def test_invalid_values_are_rejected_at_startup(
+    monkeypatch: pytest.MonkeyPatch, variable: str, value: str, field: str
+) -> None:
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValidationError, match=field):
+        _settings_from_env()

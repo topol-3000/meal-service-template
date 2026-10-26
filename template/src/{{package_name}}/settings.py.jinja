@@ -1,17 +1,34 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class HttpClientSettings(BaseModel):
+    """Shared outgoing HTTP client (`infrastructure/http.py`). Env: `HTTP_CLIENT__<FIELD>`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    timeout_seconds: PositiveFloat = 10.0
+    connect_timeout_seconds: PositiveFloat = 5.0
+    max_connections: PositiveInt = 100
 
 
 class Settings(BaseSettings):
     """Service configuration, read from environment variables and `.env`.
 
+    Each adapter gets its own sub-model, filled from `<FIELD>__<SUBFIELD>` variables
+    (`HTTP_CLIENT__TIMEOUT_SECONDS=5`), and receives only that slice in `__init__`.
+    Secrets are `SecretStr` fields in a sub-model, for example `url: SecretStr` in a
+    `DatabaseSettings` read from `DB__URL`. Call `.get_secret_value()` only where the value
+    is used; never log it or put it on a span.
+
     OpenTelemetry exporters read the standard `OTEL_*` variables themselves
     (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`, ...).
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_nested_delimiter="__")
 
     service_name: str = "{{ service_name }}"
     service_version: str = "0.1.0"
@@ -24,6 +41,8 @@ class Settings(BaseSettings):
     log_format: Literal["json", "console"] = "json"
 
     otel_enabled: bool = True
+
+    http_client: HttpClientSettings = Field(default_factory=HttpClientSettings)
 
 
 @lru_cache

@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 IMAGE ?= {{ service_name }}:dev
 
-.PHONY: help install lint fmt typecheck test check run docker-build docker-run update-template
+.PHONY: help install lint fmt typecheck imports test check run docker-build docker-run update-template
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -21,10 +21,13 @@ fmt: ## Auto-fix lint and format
 typecheck: ## Pyright (strict)
 	uv run pyright
 
+imports: ## Import-linter layer contracts
+	uv run lint-imports
+
 test: ## Pytest with coverage
 	uv run pytest --cov --cov-report=term
 
-check: lint typecheck test ## Everything CI runs
+check: lint typecheck imports test ## Everything CI runs
 
 run: ## Run locally with reload (needs .env, see .env.example)
 	uv run --env-file .env uvicorn {{ package_name }}.main:create_app --factory --reload --port {{ http_port }} --no-access-log

@@ -1,9 +1,12 @@
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
 from {{ package_name }}.api import health
+from {{ package_name }}.api.dependencies import AppState
+from {{ package_name }}.api.errors import register_error_handlers
+from {{ package_name }}.infrastructure.http import create_http_client
 from {{ package_name }}.observability import (
     RequestLoggingMiddleware,
     configure_logging,
@@ -15,25 +18,31 @@ from {{ package_name }}.settings import Settings, get_settings
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    """Composition root: builds settings, observability, resources and routes."""
     settings = settings or get_settings()
     telemetry = setup_telemetry(settings)
     configure_logging(settings)
     logger = get_logger(__name__)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
-        logger.info("service.started", version=settings.service_version)
-        yield
-        logger.info("service.stopping")
-        telemetry.shutdown()
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+        # Resources close in reverse order of opening, also when startup fails half-way.
+        # Telemetry is registered first so it shuts down last and flushes everything else.
+        async with AsyncExitStack() as stack:
+            stack.callback(telemetry.shutdown)
+            http_client = await stack.enter_async_context(create_http_client(settings.http_client))
+            app.state.app_state = AppState(settings=settings, http_client=http_client)
+            logger.info("service.started", version=settings.service_version)
+            yield
+            logger.info("service.stopping")
 
     app = FastAPI(
         title=settings.service_name,
         version=settings.service_version,
         lifespan=lifespan,
     )
-    app.state.settings = settings
     app.add_middleware(RequestLoggingMiddleware)
+    register_error_handlers(app)
     app.include_router(health.router)
     instrument_app(app)
     return app

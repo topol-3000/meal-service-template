@@ -16,6 +16,7 @@ read its `AGENTS.md` before changing anything that crosses a service boundary.
 | Everything CI runs | `make check` |
 | Lint / autofix | `make lint` / `make fmt` |
 | Types (pyright strict) | `make typecheck` |
+| Layer contracts (import-linter) | `make imports` |
 | Tests | `make test` or `uv run pytest tests/test_x.py -k name` |
 | Run locally | `cp .env.example .env && make run` → http://localhost:{{ http_port }}/docs |
 | Pull template updates | `make update-template` |
