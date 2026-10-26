@@ -54,9 +54,8 @@ python_version:
   type: str
   help: Python version
   choices:
-    - "3.13"
     - "3.14"
-  default: "3.13"
+  default: "3.14"
 
 github_owner:
   type: str
@@ -66,4 +65,4 @@ github_owner:
 author_name:
   type: str
   help: Author name
-  default: Yevhenii
+  default: Yevhenii Diemientiev

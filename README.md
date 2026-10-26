@@ -9,7 +9,7 @@ cd meal-recipes && make install && make check
 
 A generated service has:
 
-- **uv** project, Python 3.13/3.14, `src/` layout with domain / application / infrastructure / api layers
+- **uv** project, Python 3.14, `src/` layout with domain / application / infrastructure / api layers
 - **FastAPI** with `/health/live` and `/health/ready`, pydantic-settings
 - **OpenTelemetry**: traces, metrics and logs over OTLP; FastAPI and httpx auto-instrumented;
   stable HTTP semantic conventions; trace context helpers for Redis Streams messages
