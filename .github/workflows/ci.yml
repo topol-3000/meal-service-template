@@ -11,7 +11,14 @@ permissions:
 jobs:
   generate-and-check:
     # Render the template and run the generated service's full check, like a real service would.
+    # Both answers of `with_database`; the database variant also runs its integration tests
+    # (testcontainers on the runner's Docker).
+    name: generate-and-check (with_database=${{ matrix.with_database }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        with_database: [true, false]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,6 +30,7 @@ jobs:
           git config --global user.name ci
           uvx copier copy --trust --defaults --vcs-ref HEAD \
             -d service_name=meal-sample -d python_version=3.14 \
+            -d with_database=${{ matrix.with_database }} \
             . "$RUNNER_TEMP/meal-sample"
       - name: make check
         working-directory: ${{ runner.temp }}/meal-sample
@@ -34,6 +42,18 @@ jobs:
         run: |
           git add -A
           uv run pre-commit run --all-files
+      - name: Layer contracts reject forbidden imports
+        working-directory: ${{ runner.temp }}/meal-sample
+        run: |
+          # Each module is imported from the domain in turn; `make imports` must fail.
+          for module in meal_sample.settings; do
+            echo "import $module  # noqa: F401" > src/meal_sample/domain/_violation.py
+            if make imports; then
+              echo "::error::domain may import $module"
+              exit 1
+            fi
+          done
+          rm src/meal_sample/domain/_violation.py
       - name: Docker image builds
         working-directory: ${{ runner.temp }}/meal-sample
         run: docker build -t meal-sample:ci .

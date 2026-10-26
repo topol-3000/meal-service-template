@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 IMAGE ?= {{ service_name }}:dev
 
-.PHONY: help install lint fmt typecheck imports test check run docker-build docker-run update-template
+.PHONY: help install lint fmt typecheck imports test test-unit check run{% if with_database %} migrate migration{% endif %} docker-build docker-run update-template
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -24,13 +24,25 @@ typecheck: ## Pyright (strict)
 imports: ## Import-linter layer contracts
 	uv run lint-imports
 
-test: ## Pytest with coverage
+test: ## Pytest with coverage, `integration` tests included{% if with_database %} (need Docker){% endif %}
 	uv run pytest --cov --cov-report=term
+
+test-unit: ## Pytest without tests marked `integration`
+	uv run pytest -m "not integration"
 
 check: lint typecheck imports test ## Everything CI runs
 
 run: ## Run locally with reload (needs .env, see .env.example)
 	uv run --env-file .env uvicorn {{ package_name }}.main:create_app --factory --reload --port {{ http_port }} --no-access-log
+{%- if with_database %}
+
+migrate: ## Apply database migrations, as the deploy job does (DB__URL from .env)
+	uv run python -m {{ package_name }} migrate
+
+migration: ## New migration from model changes: make migration name=add_recipes
+	@test -n "$(name)" || { echo "usage: make migration name=add_recipes"; exit 1; }
+	uv run alembic revision --autogenerate -m "$(name)"
+{%- endif %}
 
 docker-build: ## Build the image
 	docker build -t $(IMAGE) .

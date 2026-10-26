@@ -14,14 +14,18 @@ decisions are in the **meal-platform** repo (`AGENTS.md`, `docs/adr/`).
 
 ## Working on the template
 
-Render and check a sample service after every change. This is what CI does:
+Render and check a sample service after every change, once per answer of
+`with_database` (`true` needs Docker for the integration tests). This is what CI does:
 
 ```bash
-uvx copier copy --trust --defaults --vcs-ref HEAD -d service_name=meal-sample . /tmp/meal-sample
+uvx copier copy --trust --defaults --vcs-ref HEAD -d service_name=meal-sample \
+  -d with_database=true . /tmp/meal-sample
 cd /tmp/meal-sample && make check && git add -A && uv run pre-commit run --all-files
 ```
 
 `--vcs-ref HEAD` renders the last commit, so commit (locally) before rendering.
+Optional parts are Copier questions: their files are listed in `_exclude` in `copier.yml`,
+and shared files use `{% if with_database %}` blocks. Check that both variants render.
 
 ## Rules
 

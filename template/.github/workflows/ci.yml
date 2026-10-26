@@ -21,7 +21,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      # One entry point, so checks added to the Makefile also run in CI.
+      # One entry point, so checks added to the Makefile also run in CI. This includes
+      # `integration` tests: testcontainers uses the runner's Docker.
       - run: make check
 
   docker:

@@ -1,0 +1,27 @@
+from sqlalchemy import CheckConstraint, Column, ForeignKey, Integer, MetaData, String, Table
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import CreateTable
+
+from {{ package_name }}.infrastructure.db.models import Base
+
+
+def test_constraints_are_named_by_the_naming_convention() -> None:
+    # A separate MetaData with Base's convention keeps these tables out of Base.metadata.
+    metadata = MetaData(naming_convention=Base.metadata.naming_convention)
+    Table("author", metadata, Column("id", Integer, primary_key=True))
+    recipe = Table(
+        "recipe",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("slug", String(80), unique=True),
+        Column("author_id", Integer, ForeignKey("author.id"), index=True),
+        CheckConstraint("id > 0", name="positive_id"),
+    )
+
+    ddl = str(CreateTable(recipe).compile(dialect=postgresql.dialect()))
+
+    assert "CONSTRAINT pk_recipe PRIMARY KEY" in ddl
+    assert "CONSTRAINT uq_recipe_slug UNIQUE" in ddl
+    assert "CONSTRAINT fk_recipe_author_id_author FOREIGN KEY" in ddl
+    assert "CONSTRAINT ck_recipe_positive_id CHECK" in ddl
+    assert [index.name for index in recipe.indexes] == ["ix_recipe_author_id"]

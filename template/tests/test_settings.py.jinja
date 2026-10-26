@@ -7,6 +7,17 @@ from {{ package_name }}.settings import Settings
 def _settings_from_env() -> Settings:
     # `_env_file=None`: read only the environment, not a developer's local `.env`.
     return Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+{%- if with_database %}
+
+
+_DB_URL = "postgresql+asyncpg://meal:s3cret@db:5432/meal"
+
+
+@pytest.fixture(autouse=True)
+def db_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Settings require DB__URL; tests about it change or delete it.
+    monkeypatch.setenv("DB__URL", _DB_URL)
+{%- endif %}
 
 
 def test_nested_settings_are_read_from_double_underscore_variables(
@@ -39,6 +50,10 @@ def test_flat_settings_keep_their_names(monkeypatch: pytest.MonkeyPatch) -> None
         ("HTTP_CLIENT__MAX_CONNECTIONS", "-1", "max_connections"),
         ("HTTP_CLIENT__TIMEOUT_SECONDS", "soon", "timeout_seconds"),
         ("LOG_LEVEL", "LOUD", "log_level"),
+        ("READINESS_CHECK_TIMEOUT_SECONDS", "0", "readiness_check_timeout_seconds"),
+{%- if with_database %}
+        ("DB__POOL_SIZE", "0", "pool_size"),
+{%- endif %}
     ],
 )
 def test_invalid_values_are_rejected_at_startup(
@@ -48,3 +63,30 @@ def test_invalid_values_are_rejected_at_startup(
 
     with pytest.raises(ValidationError, match=field):
         _settings_from_env()
+{%- if with_database %}
+
+
+def test_database_url_is_a_secret() -> None:
+    settings = _settings_from_env()
+
+    assert settings.db.url.get_secret_value() == _DB_URL
+    assert "s3cret" not in repr(settings)
+    assert settings.db.pool_size == 5
+
+
+def test_database_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DB__URL")
+
+    with pytest.raises(ValidationError, match="db"):
+        _settings_from_env()
+
+
+def test_database_url_without_async_driver_is_rejected_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DB__URL", "postgresql://meal:s3cret@db:5432/meal")
+
+    with pytest.raises(ValidationError, match="asyncpg") as error:
+        _settings_from_env()
+    assert "s3cret" not in str(error.value)
+{%- endif %}

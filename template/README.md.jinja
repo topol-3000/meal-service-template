@@ -10,6 +10,9 @@ Generated from [meal-service-template](https://github.com/{{ github_owner }}/mea
 make install
 make check
 cp .env.example .env
+{%- if with_database %}
+make migrate      # needs PostgreSQL at DB__URL (.env)
+{%- endif %}
 make run          # http://localhost:{{ http_port }}/docs
 ```
 

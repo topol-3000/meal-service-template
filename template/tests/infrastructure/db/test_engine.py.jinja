@@ -1,0 +1,72 @@
+import httpx2
+import pytest
+from fastapi import FastAPI
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.pool import QueuePool
+
+from {{ package_name }}.api.dependencies import DbSessionDep
+from {{ package_name }}.infrastructure.db.engine import create_db_engine, ping
+from {{ package_name }}.main import create_app
+from {{ package_name }}.settings import DatabaseSettings, Settings
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture
+def db_app(db_app: FastAPI) -> FastAPI:
+    async def select_one(session: DbSessionDep) -> int:
+        return (await session.execute(text("SELECT 1"))).scalar_one()
+
+    db_app.add_api_route("/select-one", select_one)
+    return db_app
+
+
+async def test_ready_reports_a_reachable_database(db_client: httpx2.AsyncClient) -> None:
+    response = await db_client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["checks"] == {"database": "ok"}
+
+
+async def test_queries_are_traced_inside_the_request_span(
+    db_client: httpx2.AsyncClient, span_exporter: InMemorySpanExporter
+) -> None:
+    response = await db_client.get("/select-one")
+
+    assert response.json() == 1
+    spans = span_exporter.get_finished_spans()
+    server = next(s for s in spans if s.kind == SpanKind.SERVER)
+    query = next(
+        s
+        for s in spans
+        if s.kind == SpanKind.CLIENT and (s.attributes or {}).get("db.query.text") == "SELECT 1"
+    )
+    assert (query.attributes or {}).get("db.system.name") == "postgresql"
+    assert server.context is not None
+    assert query.parent is not None
+    assert query.parent.span_id == server.context.span_id
+
+
+async def test_lifespan_closes_pooled_connections_on_shutdown(
+    db_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engines: list[AsyncEngine] = []
+
+    def recording_engine(settings: DatabaseSettings) -> AsyncEngine:
+        engines.append(create_db_engine(settings))
+        return engines[-1]
+
+    monkeypatch.setattr("{{ package_name }}.main.create_db_engine", recording_engine)
+    app = create_app(db_settings)
+
+    async with app.router.lifespan_context(app):
+        [engine] = engines
+        await ping(engine)
+        pool = engine.pool
+        assert isinstance(pool, QueuePool)
+        assert pool.checkedin() == 1
+
+    assert pool.checkedin() == 0

@@ -18,6 +18,11 @@ read its `AGENTS.md` before changing anything that crosses a service boundary.
 | Types (pyright strict) | `make typecheck` |
 | Layer contracts (import-linter) | `make imports` |
 | Tests | `make test` or `uv run pytest tests/test_x.py -k name` |
+| Tests without `integration` ones{% if with_database %} (no Docker){% endif %} | `make test-unit` |
+{%- if with_database %}
+| Apply migrations | `make migrate` (`DB__URL` from `.env`; deploys run `python -m {{ package_name }} migrate`) |
+| New migration from models | `make migration name=add_recipes`, then review the file |
+{%- endif %}
 | Run locally | `cp .env.example .env && make run` → http://localhost:{{ http_port }}/docs |
 | Pull template updates | `make update-template` |
 
@@ -31,6 +36,9 @@ src/{{ package_name }}/
   domain/          entities, value objects, domain errors, ports (typing.Protocol)
   application/     use cases: one module per use case, depends on domain only
   infrastructure/  adapters implementing ports: DB, Redis Streams, HTTP clients, LLM
+{%- if with_database %}
+    db/            engine, sessions, ORM `Base` (models.py), repositories, migrations/
+{%- endif %}
   api/             FastAPI routers and request/response schemas
   observability/   logging, tracing, metrics, trace propagation (do not bypass)
   settings.py      pydantic-settings, env vars only
@@ -40,9 +48,17 @@ tests/             mirrors src/; unit tests for domain/application, API tests vi
 
 Dependency direction: `api → application → domain ← infrastructure`.
 
-- `domain` imports nothing from FastAPI, SQLAlchemy, httpx2, Redis, Ollama or `observability`.
+- `domain` imports nothing from FastAPI, SQLAlchemy, httpx2, Redis, Ollama, `observability`
+  or `settings`.
 - `application` talks to the outside world only through ports defined in `domain`.
 - Wiring (which adapter implements which port) happens in `main.py` / FastAPI dependencies.
+{%- if with_database %}
+- Database access goes through repositories in `infrastructure/db/` that take the request's
+  `DbSessionDep` session: one transaction per request, committed when the route returns and
+  rolled back when it raises. Repositories never commit. Tables change only via migrations.
+- Migrations run as a one-off job before the new version starts, while the old one still
+  serves: they must work with both (add first; drop or rename in a later release).
+{%- endif %}
 - The LLM is just another port (`domain`) with an Ollama adapter (`infrastructure`).
   LLM output is always parsed into a Pydantic model; never pass raw LLM text into the domain.
 
@@ -80,6 +96,12 @@ Quality of logs, traces and metrics is a primary goal of this project.
 - Domain and application: fast unit tests with fakes for ports, no network.
 - API: `TestClient` via the `client` fixture. Observability can be asserted with the
   `span_exporter` and `log_exporter` fixtures (see `tests/test_observability.py`).
+{%- if with_database %}
+- Database: integration tests are marked `@pytest.mark.integration` and run against
+  PostgreSQL in a testcontainer (one per session, migrated once). Use the `db_session`
+  fixture for repositories (rolled back after each test) and `db_client` for HTTP tests
+  that touch the database. They need Docker; `make check` and CI run them.
+{%- endif %}
 - Warnings are errors in tests. Fix the cause instead of filtering it.
 - Every bug fix starts with a failing test.
 

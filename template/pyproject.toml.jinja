@@ -17,6 +17,13 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.45",
     "opentelemetry-instrumentation-fastapi>=0.66b1",
     "opentelemetry-instrumentation-httpx>=0.66b1",
+{%- if with_database %}
+    # <2.1 until opentelemetry-instrumentation-sqlalchemy > 0.66b1 (no 2.1 support before).
+    "sqlalchemy[asyncio]>=2.0.55,<2.1",
+    "asyncpg>=0.32",
+    "alembic>=1.20.1",
+    "opentelemetry-instrumentation-sqlalchemy>=0.66b1",
+{%- endif %}
 ]
 
 [project.scripts]
@@ -31,6 +38,9 @@ dev = [
     "pyright>=1.1.414",
     "import-linter>=2.15",
     "pre-commit>=4.7",
+{%- if with_database %}
+    "testcontainers[postgres]>=4.15",
+{%- endif %}
 ]
 
 [build-system]
@@ -94,10 +104,10 @@ forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "httpx2", "redis", "p
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
-name = "Domain does not depend on observability"
+name = "Domain does not depend on observability or settings"
 type = "forbidden"
 source_modules = ["{{ package_name }}.domain"]
-forbidden_modules = ["{{ package_name }}.observability"]
+forbidden_modules = ["{{ package_name }}.observability", "{{ package_name }}.settings"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -105,7 +115,28 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
 filterwarnings = ["error"]
+markers = ["integration: needs Docker (testcontainers); `make test-unit` skips these"]
 
+{% if with_database -%}
+[tool.alembic]
+# For the `alembic` CLI (`make migration name=...`); `python -m {{ package_name }} migrate`
+# builds the same config in infrastructure/db/migrate.py.
+script_location = "{{ package_name }}.infrastructure.db:migrations"
+file_template = "%%(year)d_%%(month).2d_%%(day).2d_%%(hour).2d%%(minute).2d_%%(rev)s_%%(slug)s"
+
+[[tool.alembic.post_write_hooks]]
+name = "ruff_fix"
+type = "module"
+module = "ruff"
+options = "check --fix REVISION_SCRIPT_FILENAME"
+
+[[tool.alembic.post_write_hooks]]
+name = "ruff_format"
+type = "module"
+module = "ruff"
+options = "format REVISION_SCRIPT_FILENAME"
+
+{% endif -%}
 [tool.coverage.run]
 source = ["src"]
 branch = true

@@ -1,11 +1,21 @@
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
+{%- if with_database %}
+from functools import partial
+{%- endif %}
 
 from fastapi import FastAPI
 
 from {{ package_name }}.api import health
 from {{ package_name }}.api.dependencies import AppState
 from {{ package_name }}.api.errors import register_error_handlers
+{%- if with_database %}
+from {{ package_name }}.infrastructure.db.engine import (
+    create_db_engine,
+    create_session_factory,
+    ping,
+)
+{%- endif %}
 from {{ package_name }}.infrastructure.http import create_http_client
 from {{ package_name }}.observability import (
     RequestLoggingMiddleware,
@@ -31,7 +41,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with AsyncExitStack() as stack:
             stack.callback(telemetry.shutdown)
             http_client = await stack.enter_async_context(create_http_client(settings.http_client))
+{%- if with_database %}
+            db_engine = create_db_engine(settings.db)
+            stack.push_async_callback(db_engine.dispose)
+            app.state.app_state = AppState(
+                settings=settings,
+                http_client=http_client,
+                db_session_factory=create_session_factory(db_engine),
+                readiness_checks={"database": partial(ping, db_engine)},
+            )
+{%- else %}
             app.state.app_state = AppState(settings=settings, http_client=http_client)
+{%- endif %}
             logger.info("service.started", version=settings.service_version)
             yield
             logger.info("service.stopping")
