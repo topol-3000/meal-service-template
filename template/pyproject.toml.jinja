@@ -42,12 +42,8 @@ dev = [
     "pyright>=1.1.414",
     "import-linter>=2.15",
     "pre-commit>=4.7",
-{%- if with_database and with_cache %}
-    "testcontainers[postgres,valkey]>=4.15",
-{%- elif with_database %}
-    "testcontainers[postgres]>=4.15",
-{%- elif with_cache %}
-    "testcontainers[valkey]>=4.15",
+{%- if with_database or with_cache %}
+    "testcontainers[{{ ((["postgres"] if with_database else []) + (["valkey"] if with_cache else [])) | join(",") }}]>=4.15",
 {%- endif %}
 ]
 

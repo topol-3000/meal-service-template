@@ -40,7 +40,7 @@ src/{{ package_name }}/
     db/            engine, sessions, ORM `Base` (models.py), repositories, migrations/
 {%- endif %}
 {%- if with_cache %}
-    cache/         `ValkeyCache` (TTL on every write, errors are misses); feature caches wrap it
+    cache/         `ValkeyCache` (TTL on every write, Valkey down = miss); feature caches wrap it
 {%- endif %}
   api/             FastAPI routers and request/response schemas
   observability/   logging, tracing, metrics (do not bypass)

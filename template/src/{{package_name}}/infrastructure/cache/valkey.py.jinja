@@ -1,6 +1,8 @@
 from typing import cast
 
 from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
@@ -17,15 +19,17 @@ def create_cache_client(settings: CacheSettings) -> Redis:
     """Build the service's one Valkey client (with its own connection pool).
 
     It is created in the lifespan (`main.py`) and closed on shutdown. It connects on the first
-    command, so the service starts while Valkey is down. A failed command is not retried
-    (redis-py's default), so an unavailable cache costs at most one timeout. Commands are
-    traced by the redis instrumentation in `observability.instrument_app`.
+    command, so the service starts while Valkey is down. Commands are traced by the redis
+    instrumentation in `observability.instrument_app`.
     """
-    # redis-py leaves the `**kwargs` of `from_url` untyped; both arguments are Redis options.
+    # redis-py leaves the `**kwargs` of `from_url` untyped; all arguments below are Redis options.
     return Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
         settings.url.get_secret_value(),
         socket_connect_timeout=settings.connect_timeout_seconds,
         socket_timeout=settings.timeout_seconds,
+        # Never retry: an unavailable cache costs one timeout, not several plus backoff.
+        # (`from_url` happens not to retry today, but `Redis()` defaults to 10 retries.)
+        retry=Retry(NoBackoff(), retries=0),
     )
 
 

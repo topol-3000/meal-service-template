@@ -53,7 +53,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cache_client = create_cache_client(settings.cache)
             stack.push_async_callback(cache_client.aclose)
 {%- endif %}
-{%- if with_database or with_cache %}
             app.state.app_state = AppState(
                 settings=settings,
                 http_client=http_client,
@@ -69,9 +68,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 readiness_checks={"database": partial(ping, db_engine)},
 {%- endif %}
             )
-{%- else %}
-            app.state.app_state = AppState(settings=settings, http_client=http_client)
-{%- endif %}
             logger.info("service.started", version=settings.service_version)
             yield
             logger.info("service.stopping")

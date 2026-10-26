@@ -45,7 +45,12 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 
 ### Open questions
 
-None right now. New questions go here with a `Q<n>` id and move to Decisions once answered.
+- **Q8** (from the chunk-3 review) With `with_database` and `with_cache`, `CACHE__URL` is a
+  required setting, so `python -m <package> migrate` and `alembic` need it too, although they
+  never touch Valkey. Keep that (one environment for the service and its migrate job, D11), or
+  let the migrate path read only `DB__URL`?
+
+New questions go here with a `Q<n>` id and move to Decisions once answered.
 (Q5–Q7 became D11–D13.)
 
 ---
@@ -288,9 +293,10 @@ Infrastructure only, no business logic. Each file comes with a test.
       logged once per call as `cache.unavailable` (warning, with `operation`, no key); other
       errors propagate. `CacheDep` yields `ValkeyCache`; feature caches wrap it behind their own
       ports (1.7a). Defaults: TTL 300 s, `CACHE__CONNECT_TIMEOUT_SECONDS` and
-      `CACHE__TIMEOUT_SECONDS` 0.5 s. No ping at startup and no readiness check. redis-py 8.1
-      doesn't retry a failed command by default (`retry_on_error` is empty, connect errors
-      aren't retryable), so nothing is overridden; a test bounds the miss to one timeout.
+      `CACHE__TIMEOUT_SECONDS` 0.5 s. No ping at startup and no readiness check.
+      `retry=Retry(NoBackoff(), 0)` is set explicitly: `from_url` happens not to retry in
+      redis-py 8.1, but the `Redis()` constructor defaults to 10 retries with backoff; a test
+      bounds a miss against a silent server to one timeout.
       Versions: `redis>=8.1`, `opentelemetry-instrumentation-redis>=0.66b1`, which accepts
       `redis >= 2.6`, so no cap. `OTEL_SEMCONV_STABILITY_OPT_IN=http,database` with either
       option. The instrumentation records commands without arguments (`GET ?`), so keys don't
@@ -391,4 +397,4 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 | 2026-10-26 | Chunk 2 done (3.8–3.10, 6.3, 6.4; D3, D6, D7) on `feat/architecture-chunk-2`. Decided while implementing: **SQLAlchemy `>=2.0.55,<2.1`**, because `opentelemetry-instrumentation-sqlalchemy` 0.66b1 refuses 2.1 (support merged upstream 2026-10-14 in PR 5120, not released yet; lift the cap with the next contrib release). SQLAlchemy is instrumented globally in `instrument_app`, like httpx2 (per-engine instrumentation works once per process); `create_db_engine` calls `create_async_engine` through its module so the patched function is used. `OTEL_SEMCONV_STABILITY_OPT_IN=http,database`. `DbSessionDep` uses `scope="function"`, because the default scope commits after the response is sent. `DB__URL` is required and checked for the asyncpg scheme; `Settings` sets `hide_input_in_errors` (both variants), so a bad URL isn't echoed into startup logs. Alembic config in `[tool.alembic]` (no `alembic.ini`), date-prefixed revision files, ruff post-write hooks, async `env.py` reading `DB__URL` via `Settings` and logging through `configure_logging`; generated migrations pass ruff and pyright strict. `alembic` is a runtime dependency, but the image doesn't ship migrations yet (Q5). The `integration` marker and `make test-unit` render in both variants (future Valkey tests). DB integration tests use `httpx2.ASGITransport` in the test's loop instead of `TestClient` (asyncpg connections are loop-bound); the container is session-scoped, engines are per test. Test image `postgres:18-alpine` (Q7). Also: `.import_linter_cache/` gitignored in generated services. Open: Q5–Q7. |
 | 2026-10-26 | Q5–Q7 answered → D11 (migrations as a one-off job from the image), D12 (one PostgreSQL in meal-platform compose, database and user per service), D13 (PostgreSQL 18). Template: migrations moved into `infrastructure/db/migrations/` so they ship in the wheel; `python -m <package> migrate` (`__main__` gets `serve` / `migrate` commands; `make migrate` uses it); `pg_advisory_xact_lock` in `env.py`, key from the service name. Verified end to end: a revision made by `make migration` is in the image and applied by `docker run <image> python -m <package> migrate`. meal-platform side is 8.4. |
 | 2026-10-26 | Scope cut: no events in the template → D14; D10 now covers only an opt-in Valkey cache (`with_cache`). New items 1.7a, 3.12–3.15, 5.7, 6.3a; 5.6 drops `add-event-handler`. |
-| 2026-10-26 | Chunk 3 done (3.12–3.15, 6.3a; D10, D14) on `feat/architecture-chunk-3`. Events removed: `add-event-handler`, `propagation.py` (`inject_trace_context` / `extract_trace_context`) and their rules; calls between services are HTTP via `HttpClientDep`. `with_cache` (default false) renders `CacheSettings` (`CACHE__URL` required, `redis://`/`rediss://`, TTL 300 s, 0.5 s timeouts), one `redis.asyncio` client in the lifespan (no ping, no readiness check) and `ValkeyCache` (`get`/`set`/`delete`, TTL on every write, connection errors and timeouts = miss or no-op logged as `cache.unavailable`). Decided while implementing: the generic `ValkeyCache` adapter (features wrap it); no retry override, because redis-py 8.1 doesn't retry by default; **`redis>=8.1` uncapped** (`opentelemetry-instrumentation-redis` 0.66b1 accepts `redis >= 2.6`); commands are traced without arguments, so keys stay out of spans (1.7a to adjust); testcontainers' `ValkeyContainer` with `valkey/valkey:9`; unit tests point the cache at a closed port, so the Valkey-down behaviour is tested without Docker. The readiness tests' example check `cache` was renamed to `storage`. CI matrix 2 × 2. |
+| 2026-10-26 | Chunk 3 done (3.12–3.15, 6.3a; D10, D14) on `feat/architecture-chunk-3`. Events removed: `add-event-handler`, `propagation.py` (`inject_trace_context` / `extract_trace_context`) and their rules; calls between services are HTTP via `HttpClientDep`. `with_cache` (default false) renders `CacheSettings` (`CACHE__URL` required, `redis://`/`rediss://`, TTL 300 s, 0.5 s timeouts), one `redis.asyncio` client in the lifespan (no ping, no readiness check) and `ValkeyCache` (`get`/`set`/`delete`, TTL on every write, connection errors and timeouts = miss or no-op logged as `cache.unavailable`). Decided while implementing: the generic `ValkeyCache` adapter (features wrap it); retries switched off explicitly (redis-py's `Redis()` defaults to 10); **`redis>=8.1` uncapped** (`opentelemetry-instrumentation-redis` 0.66b1 accepts `redis >= 2.6`); commands are traced without arguments, so keys stay out of spans (1.7a to adjust); testcontainers' `ValkeyContainer` with `valkey/valkey:9`; unit tests point the cache at a closed port, so the Valkey-down behaviour is tested without Docker. The readiness tests' example check `cache` was renamed to `storage`. CI matrix 2 × 2. |
