@@ -35,12 +35,12 @@ use `uv add <pkg>` (or `uv add --dev`) so `uv.lock` stays the source of truth.
 src/{{ package_name }}/
   domain/          entities, value objects, domain errors, ports (typing.Protocol)
   application/     use cases: one module per use case, depends on domain only
-  infrastructure/  adapters implementing ports: DB, Redis Streams, HTTP clients, LLM
+  infrastructure/  adapters implementing ports: DB, HTTP clients, LLM
 {%- if with_database %}
     db/            engine, sessions, ORM `Base` (models.py), repositories, migrations/
 {%- endif %}
   api/             FastAPI routers and request/response schemas
-  observability/   logging, tracing, metrics, trace propagation (do not bypass)
+  observability/   logging, tracing, metrics (do not bypass)
   settings.py      pydantic-settings, env vars only
   main.py          composition root: create_app() wires everything together
 tests/             mirrors src/; unit tests for domain/application, API tests via TestClient
@@ -66,7 +66,7 @@ Dependency direction: `api → application → domain ← infrastructure`.
 
 - Python {{ python_version }}, full type hints, pyright strict must pass. No `Any` in signatures
   of domain or application code; no `# type: ignore` without an error code and a reason.
-- Pydantic models at the boundaries (API, events, LLM output, settings);
+- Pydantic models at the boundaries (API, LLM output, settings);
   plain dataclasses (frozen) inside the domain are fine.
 - Async all the way for I/O. No blocking calls (`requests`, `time.sleep`) in async code.
 - Small functions, explicit names, no clever metaprogramming. Comments explain *why*.
@@ -84,9 +84,8 @@ Quality of logs, traces and metrics is a primary goal of this project.
 - Incoming HTTP and outgoing httpx2 calls are traced automatically. Add a manual span for every
   use case and every LLM call: `with get_tracer(__name__).start_as_current_span("plan.generate"):`.
   Put useful ids on spans as attributes (`span.set_attribute("recipe.id", ...)`).
-- Events between services: producers add `inject_trace_context()` to the message fields;
-  consumers start a `SpanKind.CONSUMER` span with `context=extract_trace_context(fields)`.
-  One user action must be one trace across all services.
+- Other services are called over HTTP through the shared httpx2 client (`HttpClientDep`),
+  which carries the trace context: one user action must be one trace across all services.
 - Business metrics through `get_meter(__name__)` (counters/histograms), names like
   `recipes.imported`, with low-cardinality attributes only.
 
@@ -109,8 +108,6 @@ Quality of logs, traces and metrics is a primary goal of this project.
 
 - HTTP API: FastAPI generates OpenAPI; the copy in meal-platform `contracts/openapi/` is
   updated in the same change when the API changes.
-- Events: schemas in meal-platform `contracts/events/`. Add fields, never rename or remove
-  them without a new event version.
 
 ## Boundaries for agents
 
@@ -123,5 +120,5 @@ Quality of logs, traces and metrics is a primary goal of this project.
 
 ## Skills
 
-Task recipes live in `.claude/skills/`: `add-endpoint`, `add-event-handler`,
-`verify-observability`. Use them when the task matches.
+Task recipes live in `.claude/skills/`: `add-endpoint`, `verify-observability`.
+Use them when the task matches.

@@ -8,13 +8,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind
 
 from {{ package_name }}.main import create_app
-from {{ package_name }}.observability import (
-    configure_logging,
-    extract_trace_context,
-    get_logger,
-    get_tracer,
-    inject_trace_context,
-)
+from {{ package_name }}.observability import configure_logging, get_logger, get_tracer
 from {{ package_name }}.settings import Settings
 
 
@@ -84,24 +78,3 @@ def test_logs_are_exported_to_otel(
     assert record.attributes is not None
     assert record.attributes["recipe_id"] == 42
     assert record.trace_id == span.get_span_context().trace_id
-
-
-def test_trace_context_survives_message_roundtrip(span_exporter: InMemorySpanExporter) -> None:
-    tracer = get_tracer("test")
-
-    with tracer.start_as_current_span("publish", kind=SpanKind.PRODUCER):
-        headers = inject_trace_context({"event_type": "recipe.import.requested"})
-
-    with tracer.start_as_current_span(
-        "process", context=extract_trace_context(headers), kind=SpanKind.CONSUMER
-    ):
-        pass
-
-    producer, consumer = span_exporter.get_finished_spans()
-    assert headers["event_type"] == "recipe.import.requested"
-    assert "traceparent" in headers
-    assert producer.context is not None
-    assert consumer.context is not None
-    assert consumer.context.trace_id == producer.context.trace_id
-    assert consumer.parent is not None
-    assert consumer.parent.span_id == producer.context.span_id
