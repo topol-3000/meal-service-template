@@ -80,7 +80,7 @@ docs/
 - [ ] **1.2 `docs/architecture.md`.**
   - [ ] Layers and what each may import (mirrors the import-linter contracts in 2.1).
   - [ ] Composition root: `create_app()` builds settings, adapters and use cases; resources
-        with a lifetime (DB engine, httpx client) are opened in `lifespan` via `AsyncExitStack`
+        with a lifetime (DB engine, httpx2 client) are opened in `lifespan` via `AsyncExitStack`
         and closed in reverse order. This replaces the boilerplate's `on_start/after_start/on_stop`.
   - [ ] How dependencies reach routes: typed state object on `app.state`, providers in
         `api/dependencies.py`, aliases like `type PlanService = Annotated[GeneratePlan, Depends(get_generate_plan)]`.
@@ -137,7 +137,7 @@ docs/
 - [ ] **1.6 `docs/conventions/errors.md`.**
   - [ ] Hierarchy: `DomainError` base in `domain/errors.py` → `NotFoundError`,
         `ConflictError`, `ValidationError`, `ExternalServiceError`; feature errors subclass these.
-  - [ ] Adapters convert library exceptions (httpx, SQLAlchemy, LLM client) into domain errors at the boundary.
+  - [ ] Adapters convert library exceptions (httpx2, SQLAlchemy, LLM client) into domain errors at the boundary.
   - [ ] One exception handler in `api/errors.py` maps base classes to HTTP status + a single
         problem-details response shape. No per-route try/except for mapping.
   - [ ] Logging rule: log once, where the error is handled, not at every layer.
@@ -166,10 +166,10 @@ docs/
   - [ ] Observability assertions with existing `span_exporter` / `log_exporter` fixtures.
 
 - [ ] **1.9 `docs/stack.md`.**
-  - [ ] Approved: FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx,
+  - [ ] Approved: FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx2,
         OpenTelemetry, SQLAlchemy 2 async + asyncpg + Alembic, Redis (`redis.asyncio`) for
         streams, pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
-  - [ ] Banned, with replacements: `requests`/`aiohttp` → httpx; Tortoise → SQLAlchemy;
+  - [ ] Banned, with replacements: `requests`/`aiohttp`/`httpx` → httpx2 (Pydantic-maintained successor of httpx); Tortoise → SQLAlchemy;
         `dependency-injector`, `fastapi-class`, `fastapi-utils` → plain FastAPI DI;
         Celery → Redis Streams events; Poetry/pip → uv; `logging.getLogger`/`print` →
         observability helpers. Auth libraries are not listed (D9).
@@ -180,10 +180,10 @@ docs/
 - [ ] **2.1 import-linter** in dev dependencies, config in `pyproject.toml.jinja`:
   - [ ] `layers` contract: `api` → `application` → `domain`; `infrastructure` → `domain`.
   - [ ] `forbidden` contract: `domain` and `application` must not import `fastapi`,
-        `starlette`, `sqlalchemy`, `httpx`, `redis`, `pydantic_settings`.
+        `starlette`, `sqlalchemy`, `httpx2`, `redis`, `pydantic_settings`.
   - [ ] `forbidden`: `domain` must not import `{{ package_name }}.observability`.
   - [ ] Add `make imports` target, include it in `make check` and pre-commit.
-- [ ] **2.2 ruff banned-api** additions: `requests`, `aiohttp`, `typing.Optional`, `typing.Union`,
+- [ ] **2.2 ruff banned-api** additions: `requests`, `aiohttp`, `httpx`, `typing.Optional`, `typing.Union`,
       `typing.List`/`Dict` (in case UP misses them), `print` is already covered by `T20`.
 - [ ] **2.3 Template CI** runs each check step separately; switch it to `make check` so new
       checks (import-linter) can't be forgotten in CI.
@@ -199,7 +199,7 @@ Infrastructure only, no business logic. Each file comes with a test.
 - [ ] **3.4** `main.py`: lifespan with `AsyncExitStack`; typed app-state object holding resources.
 - [ ] **3.5** `api/dependencies.py`: providers for settings and resources, `Annotated` aliases.
 - [ ] **3.6** `settings.py`: nested sub-model pattern (`env_nested_delimiter="__"`), `SecretStr` example.
-- [ ] **3.7** Shared `infrastructure/http.py`: one lifespan-managed `httpx.AsyncClient`
+- [ ] **3.7** Shared `infrastructure/http.py`: one lifespan-managed `httpx2.AsyncClient`
       factory (timeouts, instrumentation) instead of per-call clients.
 - [ ] **3.8** Copier question `with_database` in `copier.yml` (D6); conditional dependencies
       in `pyproject.toml.jinja`, conditional `.env.example` entries, and `_exclude` rules so
@@ -234,7 +234,7 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 - [ ] **5.2 `add-use-case`**: use case class with ports, span, logging, unit test with fakes.
 - [ ] **5.3 `add-repository`** (only when `with_database`): ORM model, Protocol port, repository, migration, integration test.
 - [ ] **5.4 `add-setting`**: settings sub-model, `.env.example`, injection into a component, test.
-- [ ] **5.5 `add-external-client`**: port + httpx adapter, error conversion, retries/timeouts, fake.
+- [ ] **5.5 `add-external-client`**: port + httpx2 adapter, error conversion, retries/timeouts, fake.
 - [ ] **5.6** Update `add-endpoint` and `add-event-handler` to link the new docs, use the
       `Annotated` dependencies, `ApiModel`, and the central error handler.
 
@@ -273,3 +273,4 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 |---|---|
 | 2026-10-26 | Plan drafted; decisions D1–D5 agreed. |
 | 2026-10-26 | Q1–Q4 answered → D6 (DB opt-in), D7 (testcontainers), D8 (Trivy), D9 (auth out of scope). |
+| 2026-10-26 | httpx replaced by httpx2 in the template (OTel httpx instrumentation supports it since 0.66b1). |

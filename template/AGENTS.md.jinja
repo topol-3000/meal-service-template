@@ -39,7 +39,7 @@ tests/             mirrors src/; unit tests for domain/application, API tests vi
 
 Dependency direction: `api → application → domain ← infrastructure`.
 
-- `domain` imports nothing from FastAPI, SQLAlchemy, httpx, Redis, Ollama or `observability`.
+- `domain` imports nothing from FastAPI, SQLAlchemy, httpx2, Redis, Ollama or `observability`.
 - `application` talks to the outside world only through ports defined in `domain`.
 - Wiring (which adapter implements which port) happens in `main.py` / FastAPI dependencies.
 - The LLM is just another port (`domain`) with an Ollama adapter (`infrastructure`).
@@ -64,7 +64,7 @@ Quality of logs, traces and metrics is a primary goal of this project.
 - Log events are dotted snake_case names with key-value context, not prose:
   `logger.info("recipe.imported", recipe_id=..., source="json-ld")`. No f-strings in messages.
 - Never log secrets, tokens or full LLM prompts with personal data.
-- Incoming HTTP and outgoing httpx calls are traced automatically. Add a manual span for every
+- Incoming HTTP and outgoing httpx2 calls are traced automatically. Add a manual span for every
   use case and every LLM call: `with get_tracer(__name__).start_as_current_span("plan.generate"):`.
   Put useful ids on spans as attributes (`span.set_attribute("recipe.id", ...)`).
 - Events between services: producers add `inject_trace_context()` to the message fields;
