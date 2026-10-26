@@ -65,6 +65,10 @@ def test_flat_settings_keep_their_names(monkeypatch: pytest.MonkeyPatch) -> None
 {%- if with_database %}
         ("DB__POOL_SIZE", "0", "pool_size"),
 {%- endif %}
+{%- if with_cache %}
+        ("CACHE__DEFAULT_TTL_SECONDS", "0", "default_ttl_seconds"),
+        ("CACHE__TIMEOUT_SECONDS", "-1", "timeout_seconds"),
+{%- endif %}
     ],
 )
 def test_invalid_values_are_rejected_at_startup(
@@ -98,6 +102,43 @@ def test_database_url_without_async_driver_is_rejected_without_echoing_it(
     monkeypatch.setenv("DB__URL", "postgresql://meal:s3cret@db:5432/meal")
 
     with pytest.raises(ValidationError, match="asyncpg") as error:
+        _settings_from_env()
+    assert "s3cret" not in str(error.value)
+{%- endif %}
+{%- if with_cache %}
+
+
+def test_cache_url_is_a_secret() -> None:
+    settings = _settings_from_env()
+
+    assert settings.cache.url.get_secret_value() == _CACHE_URL
+    assert "s3cret" not in repr(settings)
+    assert settings.cache.default_ttl_seconds == 300
+
+
+def test_cache_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CACHE__URL")
+
+    with pytest.raises(ValidationError, match="cache"):
+        _settings_from_env()
+
+
+@pytest.mark.parametrize("url", ["redis://cache:6379/0", "rediss://:s3cret@cache:6380/0"])
+def test_cache_url_may_use_tls(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    monkeypatch.setenv("CACHE__URL", url)
+
+    assert _settings_from_env().cache.url.get_secret_value() == url
+
+
+@pytest.mark.parametrize(
+    "url", ["valkey://:s3cret@cache:6379/0", "unix:///run/s3cret.sock", "cache:6379"]
+)
+def test_cache_url_with_another_scheme_is_rejected_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("CACHE__URL", url)
+
+    with pytest.raises(ValidationError, match="redis://") as error:
         _settings_from_env()
     assert "s3cret" not in str(error.value)
 {%- endif %}
