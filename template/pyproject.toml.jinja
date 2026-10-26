@@ -11,7 +11,7 @@ dependencies = [
     "pydantic>=2.14",
     "pydantic-settings>=2.16",
     "structlog>=26.1",
-    "httpx>=0.28",
+    "httpx2>=2.16",
     "opentelemetry-api>=1.45",
     "opentelemetry-sdk>=1.45",
     "opentelemetry-exporter-otlp-proto-http>=1.45",
@@ -27,8 +27,6 @@ dev = [
     "pytest>=9.1",
     "pytest-asyncio>=1.4",
     "pytest-cov>=7.0",
-    # starlette.testclient uses httpx2; runtime code keeps httpx (it has OTel instrumentation).
-    "httpx2>=2.16",
     "ruff>=0.17",
     "pyright>=1.1.414",
     "pre-commit>=4.7",

@@ -8,7 +8,7 @@ from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPX2ClientInstrumentor
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
@@ -74,12 +74,12 @@ def setup_telemetry(settings: Settings) -> Telemetry:
 
 
 def instrument_app(app: FastAPI) -> None:
-    """Auto-instrument incoming FastAPI requests and outgoing httpx calls."""
+    """Auto-instrument incoming FastAPI requests and outgoing httpx2 calls."""
     # Stable HTTP semantic conventions: `http.server.request.duration` in seconds,
     # `http.request.method`, ... instead of the legacy names. Read on first instrumentation.
     os.environ.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", "http")
     FastAPIInstrumentor.instrument_app(app, excluded_urls=_EXCLUDED_URLS)
-    httpx_instrumentor = HTTPXClientInstrumentor()
+    httpx_instrumentor = HTTPX2ClientInstrumentor()
     if not httpx_instrumentor.is_instrumented_by_opentelemetry:
         httpx_instrumentor.instrument()
 
