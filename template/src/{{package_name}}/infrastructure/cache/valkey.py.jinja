@@ -4,6 +4,7 @@ from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import OutOfMemoryError, ReadOnlyError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from {{ package_name }}.observability import get_logger
@@ -11,8 +12,10 @@ from {{ package_name }}.settings import CacheSettings
 
 _logger = get_logger(__name__)
 
-# Valkey is down, unreachable or too slow. Any other error is a bug and propagates.
-_UNAVAILABLE = (RedisConnectionError, RedisTimeoutError)
+# Valkey is down, unreachable or too slow (connection errors include a wrong password and a
+# full pool), or it refuses writes: a replica after a failover, or out of memory. Any other
+# error (a key of another type, an invalid TTL) is a bug and propagates.
+_UNAVAILABLE = (RedisConnectionError, RedisTimeoutError, ReadOnlyError, OutOfMemoryError)
 
 
 def create_cache_client(settings: CacheSettings) -> Redis:
@@ -39,8 +42,9 @@ class ValkeyCache:
     Generic on purpose: a feature defines its own port in `domain/` (`RecipeCache`) and an
     adapter here that wraps this class, builds the keys and (de)serialises the values.
 
-    The cache is never the source of truth: when Valkey is down, unreachable or slow, a read
-    is a miss and a write or delete is skipped, logged once per call as `cache.unavailable`.
+    The cache is never the source of truth: when Valkey is down, unreachable, slow or refuses
+    writes, a read is a miss and a write or delete is skipped, logged once per call as
+    `cache.unavailable` with the `error_type`.
     """
 
     def __init__(self, client: Redis, *, default_ttl_seconds: int) -> None:
@@ -51,7 +55,7 @@ class ValkeyCache:
         try:
             value = await self._client.get(key)
         except _UNAVAILABLE as exc:
-            _logger.warning("cache.unavailable", operation="get", error=repr(exc))
+            _log_unavailable("get", exc)
             return None
         # The client is built without `decode_responses`, so values come back as bytes.
         return cast("bytes | None", value)
@@ -62,10 +66,17 @@ class ValkeyCache:
         try:
             await self._client.set(key, value, ex=ttl)
         except _UNAVAILABLE as exc:
-            _logger.warning("cache.unavailable", operation="set", error=repr(exc))
+            _log_unavailable("set", exc)
 
     async def delete(self, key: str) -> None:
         try:
             await self._client.delete(key)
         except _UNAVAILABLE as exc:
-            _logger.warning("cache.unavailable", operation="delete", error=repr(exc))
+            _log_unavailable("delete", exc)
+
+
+def _log_unavailable(operation: str, exc: Exception) -> None:
+    # No key: keys may contain ids of people.
+    _logger.warning(
+        "cache.unavailable", operation=operation, error_type=type(exc).__name__, error=repr(exc)
+    )
