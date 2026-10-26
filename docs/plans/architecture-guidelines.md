@@ -29,7 +29,7 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 | # | Topic | Decision |
 |---|---|---|
 | D1 | Code organisation | Layer-first (`domain/`, `application/`, `infrastructure/`, `api/`). Once a service has more than one aggregate, use feature subfolders inside each layer (`domain/recipes/`, `application/recipes/`, ...). |
-| D2 | Domain models | Frozen `dataclass(slots=True)` entities and value objects. Pydantic only at boundaries (API, events, LLM output, settings). |
+| D2 | Domain models | Frozen `dataclass(slots=True)` entities and value objects. Pydantic only at boundaries (API, LLM output, settings). |
 | D3 | Persistence | SQLAlchemy 2.x async + asyncpg + Alembic. Repositories implement domain ports (Protocols). No Unit of Work for now; transaction boundary = one use case call. Revisit when a use case spans several repositories. |
 | D4 | Configuration | Env vars only (pydantic-settings). Vault deferred; when it arrives it becomes a settings source, not a service. |
 | D5 | DI | No DI framework. Composition root in `main.py` (lifespan), dependency providers in `api/dependencies.py`, typed `Annotated[..., Depends(...)]` aliases. |
@@ -37,7 +37,8 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 | D7 | Integration-test database | `testcontainers[postgres]`: self-contained, one container per test session. Tests are marked `@pytest.mark.integration` and run in CI (Docker is available on GitHub runners). `make test` runs everything; `make test-unit` skips `integration`. |
 | D8 | Security scanning | Trivy in the template CI, a cleaned-up version of the boilerplate's workflow (see 6.1). |
 | D9 | Auth | Out of scope for the template for now. No auth code, docs or library choice in this plan; it gets its own plan when the first service needs it. |
-| D10 | Event bus | Valkey server (BSD-3, Linux Foundation; Streams are all we use, Redis 8 extras aren't needed). Client is redis-py `redis.asyncio`, traced by `opentelemetry-instrumentation-redis`. Not valkey-py (no OTel instrumentation, slow releases) and not Valkey GLIDE (its Python OTel exports separately and can't attach spans to the app's trace). All Valkey calls go through one adapter in `infrastructure/` so the client can be swapped in one file. Revisit when GLIDE's Python client accepts a parent span context, or if redis-py stops working with Valkey. |
+| D10 | Cache | Opt-in Copier question `with_cache: bool` (default `false`), like D6. When true it renders a Valkey cache adapter, `CacheSettings`, the client lifecycle, the cache doc and skill, and the redis-py dependency. Server: Valkey (BSD-3, Linux Foundation; Redis 8 extras aren't needed). Client: redis-py `redis.asyncio`, traced by `opentelemetry-instrumentation-redis`. Not valkey-py (no OTel instrumentation, slow releases) and not Valkey GLIDE (its Python OTel exports separately and can't attach spans to the app's trace). The cache is an optimisation, never the source of truth: every write has a TTL, a cache error counts as a miss (logged once, request continues), and `/health/ready` does not check it. All cache calls go through one adapter in `infrastructure/cache/`, so the client can be swapped in one file. Revisit the client when GLIDE's Python client accepts a parent span context, or if redis-py stops working with Valkey. |
+| D14 | Events between services | Not in the template: no event bus, stream consumers or background workers (Redis/Valkey Streams, Celery). Services talk over HTTP. If a service needs messaging, it gets its own plan and decision first. |
 | D11 | Migrations in deployment | A one-off job from the service image runs `python -m <package> migrate` before the new version starts (compose: a `<service>-migrate` service the app waits on with `depends_on: condition: service_completed_successfully`; Kubernetes: init container or pre-upgrade Job). Not in the container entrypoint (replicas race, a failed migration becomes a crash loop) and not from CI (CI would need database credentials and network access). Migrations ship inside the package (`infrastructure/db/migrations/`); a PostgreSQL advisory lock serialises concurrent runs. Migrations must work with the previous release too (expand, then contract). |
 | D12 | Local PostgreSQL | One PostgreSQL in meal-platform compose on `localhost:5432`, with a database and a user per service (service code never reads another service's tables). Local credentials follow `.env.example`: user, password and database are all named after the package. meal-platform gets an idempotent way to add a service's database (init scripts run only on a fresh volume). Tests keep using testcontainers. |
 | D13 | PostgreSQL version | 18 (19 was still at RC in 2026-10; move after its first minor releases). The meal-platform compose tag is the reference; the template's `POSTGRES_IMAGE` test constant must match it. |
@@ -64,6 +65,7 @@ docs/
     settings.md                 settings structure, secrets, how settings reach components
     errors.md                   error hierarchy and HTTP mapping
     persistence.md              SQLAlchemy, repositories, migrations, transactions
+    caching.md                  cache-aside with Valkey, keys, TTLs, failure handling (with_cache)
     testing.md                  test philosophy, layout, fakes vs mocks, fixtures
 .claude/skills/                 task recipes (see Phase 5)
 ```
@@ -81,15 +83,17 @@ docs/
       | a new HTTP endpoint | `api/<feature>.py` router + schemas |
       | a new config value | `settings.py` (sub-model per adapter) |
       | a DB table | `infrastructure/db/models.py` + Alembic migration |
+      | cache a slow lookup | port in `domain/`, adapter in `infrastructure/cache/` (`with_cache`) |
 
 - [ ] **1.2 `docs/architecture.md`.**
   - [ ] Layers and what each may import (mirrors the import-linter contracts in 2.1).
   - [ ] Composition root: `create_app()` builds settings, adapters and use cases; resources
-        with a lifetime (DB engine, httpx2 client) are opened in `lifespan` via `AsyncExitStack`
+        with a lifetime (DB engine, httpx2 client, cache client) are opened in `lifespan` via `AsyncExitStack`
         and closed in reverse order. This replaces the boilerplate's `on_start/after_start/on_stop`.
   - [ ] How dependencies reach routes: typed state object on `app.state`, providers in
         `api/dependencies.py`, aliases like `type PlanService = Annotated[GeneratePlan, Depends(get_generate_plan)]`.
-  - [ ] Readiness: `/health/ready` checks every registered resource (DB ping etc.).
+  - [ ] Readiness: `/health/ready` checks every required resource (DB ping etc.). The cache
+        is not required, so it has no readiness check (D10).
   - [ ] Request flow diagram: router → use case → port → adapter, with where spans/logs happen.
 
 - [ ] **1.3 `docs/conventions/python.md`.**
@@ -121,8 +125,8 @@ docs/
 
 - [ ] **1.4 `docs/conventions/models.md`.**
   - [ ] Three kinds: API schemas (Pydantic, `api/`), domain entities (frozen dataclasses,
-        `domain/`), persistence models (SQLAlchemy, `infrastructure/db/`). Event and LLM-output
-        schemas are Pydantic boundary models too.
+        `domain/`), persistence models (SQLAlchemy, `infrastructure/db/`). LLM-output schemas
+        are Pydantic boundary models too; so are cached values (serialised with `model_dump_json`).
   - [ ] Base classes: `ApiModel(BaseModel)` with `ConfigDict(extra="forbid", frozen=True)`
         (the idea behind the boilerplate's `_ExtraBaseModel`, in v2 syntax). Separate request and response models.
   - [ ] Field rules: `Annotated[str, Field(min_length=1, max_length=200)]`, reusable
@@ -159,6 +163,21 @@ docs/
         so every migration works with the release that is still running.
   - [ ] N+1 guidance: explicit `selectinload` and no lazy loading in async (`lazy="raise"`).
 
+- [ ] **1.7a `docs/conventions/caching.md`**, rendered only when `with_cache` (D10);
+      `AGENTS.md` links to it conditionally.
+  - [ ] Cache-aside only: read the cache, on a miss call the real source and write back.
+        No write-through, no cache as the only copy of data.
+  - [ ] Ports named after the need (`RecipeCache`), adapter in `infrastructure/cache/`;
+        application code never sees redis-py types.
+  - [ ] Keys: `<service>:<feature>:<version>:<id>`; bump `<version>` when the cached shape
+        changes instead of migrating old entries.
+  - [ ] Every write sets a TTL (`CACHE__DEFAULT_TTL_SECONDS` unless the feature needs another).
+  - [ ] Values are Pydantic models as JSON; a value that fails to parse is a miss.
+  - [ ] Failures: connection errors and timeouts become a miss, logged once as
+        `cache.unavailable`; the request still succeeds. Invalidate by deleting the key
+        after the source of truth changes.
+  - [ ] No secrets or personal data in keys (keys show up in span attributes).
+
 - [ ] **1.8 `docs/conventions/testing.md`.**
   - [ ] Port the boilerplate's **test philosophy hard rule**: test the requirement, not the
         implementation; cover happy path, edges, failures and invariants; if a requirement is
@@ -170,15 +189,17 @@ docs/
   - [ ] Integration tests for repositories against real Postgres via testcontainers (D7):
         session-scoped container fixture, migrations applied once, each test in a rolled-back
         transaction, marked `integration`.
+  - [ ] (`with_cache`) the cache adapter against a real Valkey container, flushed between
+        tests, marked `integration`; everything above the adapter uses an in-memory fake.
   - [ ] Observability assertions with existing `span_exporter` / `log_exporter` fixtures.
 
 - [ ] **1.9 `docs/stack.md`.**
   - [ ] Approved: FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx2,
         OpenTelemetry, SQLAlchemy 2 async + asyncpg + Alembic, Valkey via redis-py
-        (`redis.asyncio`) for Streams (D10), pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
+        (`redis.asyncio`) as an optional cache (D10), pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
   - [ ] Banned, with replacements: `requests`/`aiohttp`/`httpx` → httpx2 (Pydantic-maintained successor of httpx); Tortoise → SQLAlchemy;
         `dependency-injector`, `fastapi-class`, `fastapi-utils` → plain FastAPI DI;
-        `valkey`/`valkey-glide` → redis-py (D10); Celery → Redis Streams events; Poetry/pip → uv; `logging.getLogger`/`print` →
+        `valkey`/`valkey-glide` → redis-py (D10); Celery and stream consumers → not in the template (D14); Poetry/pip → uv; `logging.getLogger`/`print` →
         observability helpers. Auth libraries are not listed (D9).
   - [ ] Rule: a new runtime dependency needs approval (already in AGENTS.md) and an entry here.
 
@@ -242,6 +263,23 @@ Infrastructure only, no business logic. Each file comes with a test.
       readiness, span nesting, pool disposal, commit/rollback/failed commit, models vs
       migrations (`alembic check`) and a downgrade/upgrade round trip.
 - [x] **3.11** Tests: error-mapping test, lifespan open/close test, readiness test, settings parsing test.
+- [ ] **3.12** Remove the event parts of the template (D14): the `add-event-handler` skill,
+      `observability/propagation.py` and its exports and test, the "Events between services" and
+      "Events: schemas in meal-platform `contracts/events/`" rules in `AGENTS.md.jinja`, and
+      "Redis Streams" in the `infrastructure` docstring, the layering diagram and `README.md`.
+      HTTP calls between services already carry trace context through the httpx2 instrumentation.
+- [ ] **3.13** Copier question `with_cache` in `copier.yml` (D10): `_exclude` for
+      `infrastructure/cache/`, `tests/infrastructure/cache/` and `caching.md`;
+      `{% if with_cache %}` blocks in settings, `AppState`, lifespan, telemetry, `.env.example`,
+      `AGENTS.md` and `README`; conditional `redis` and `opentelemetry-instrumentation-redis` dependencies.
+- [ ] **3.14** (`with_cache`) `infrastructure/cache/`: `CacheSettings` (`CACHE__URL: SecretStr`,
+      `redis://` or `rediss://`; `CACHE__DEFAULT_TTL_SECONDS`; short socket timeouts), one
+      `redis.asyncio.Redis` created in the lifespan and closed through the `AsyncExitStack`,
+      `CacheDep` in `api/dependencies.py`, global instrumentation in `instrument_app`.
+      No business cache in the skeleton; the `add-cache` skill shows the pattern.
+- [ ] **3.15** (`with_cache`) testcontainers Valkey fixture (`valkey/valkey:9`, matching the
+      meal-platform compose tag), tests for the client lifecycle, span nesting under a request,
+      and "Valkey down → miss, request succeeds".
 
 ## Phase 4: Port useful parts of the boilerplate
 
@@ -259,7 +297,8 @@ Infrastructure only, no business logic. Each file comes with a test.
 
 `dependency-injector` + wiring, `fastapi-class` `View`, Tortoise ORM, Vault service (for now),
 `python-jose`, Celery, Poetry, `@timings_decorator` (OTel spans cover it), `Optional[T]`
-style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule set.
+style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule set,
+`RedisService` as a general-purpose service (the cache is a port + adapter instead).
 
 ## Phase 5: Skills (task recipes with code examples)
 
@@ -268,8 +307,10 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 - [ ] **5.3 `add-repository`** (only when `with_database`): ORM model, Protocol port, repository, migration, integration test.
 - [ ] **5.4 `add-setting`**: settings sub-model, `.env.example`, injection into a component, test.
 - [ ] **5.5 `add-external-client`**: port + httpx2 adapter, error conversion, retries/timeouts, fake.
-- [ ] **5.6** Update `add-endpoint` and `add-event-handler` to link the new docs, use the
-      `Annotated` dependencies, `ApiModel`, and the central error handler.
+- [ ] **5.6** Update `add-endpoint` to link the new docs, use the `Annotated` dependencies,
+      `ApiModel`, and the central error handler.
+- [ ] **5.7 `add-cache`** (only when `with_cache`): cache-aside around an existing port, key
+      and TTL, Pydantic value model, fake for unit tests, integration test against Valkey.
 
 ## Phase 6: CI and security
 
@@ -280,6 +321,7 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 - [ ] **6.2** Dependency audit of `uv.lock` (Trivy fs covers it; decide if a separate step is needed).
 - [x] **6.3** Template repo CI: render with `with_database=true` and `false` (matrix); both
       must pass `make check`, pre-commit and the Docker build.
+- [ ] **6.3a** Extend the matrix with `with_cache` (2 × 2 renders).
       Job names are now `generate-and-check (with_database=true|false)`; update required
       status checks if branch protection lists the old name.
 - [x] **6.4** Generated service CI runs integration tests (Docker available on the runner, D7).
@@ -287,8 +329,8 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 
 ## Phase 7: Verification
 
-- [ ] **7.1** Render a sample service with and without the database: `make check` +
-      pre-commit pass with zero edits in both.
+- [ ] **7.1** Render a sample service for every `with_database` × `with_cache` combination:
+      `make check` + pre-commit pass with zero edits in all four.
 - [ ] **7.2** Deliberately break each rule (domain imports fastapi, `Optional`, `requests`)
       and confirm the tooling fails.
 - [ ] **7.3 Agent dry run.** In a rendered sample, ask an agent to "add recipe import by URL"
@@ -298,14 +340,16 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 
 ## Phase 8: Release
 
-- [ ] **8.1** Update the template repo's `AGENTS.md` / `README.md` (new docs, new Copier question).
+- [ ] **8.1** Update the template repo's `AGENTS.md` / `README.md` (new docs, new Copier questions).
 - [ ] **8.2** Tag `v0.2.0`; tag message lists breaking changes and steps for existing services
-      (new dev dependency, `make check` now includes imports, new settings layout).
-- [ ] **8.3** Record the decisions D1–D13 as ADRs in meal-platform `docs/adr/`.
+      (new dev dependency, `make check` now includes imports, new settings layout,
+      `inject_trace_context`/`extract_trace_context` and `add-event-handler` removed).
+- [ ] **8.3** Record the decisions D1–D14 as ADRs in meal-platform `docs/adr/`.
 - [ ] **8.4** meal-platform compose (D11, D12, D13): `postgres:18-alpine` service on
       `localhost:5432` with a volume; an idempotent way to add a database and user per
       service (e.g. `make db-add name=meal-recipes`); the `<service>-migrate` one-off
-      service pattern for each service that has a database.
+      service pattern for each service that has a database; a `valkey/valkey:9` service on
+      `localhost:6379` for services with `with_cache` (D10).
 
 ## Progress log
 
@@ -319,3 +363,4 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 | 2026-10-26 | Chunk-1 review fixes on branch `feat/architecture-chunk-2` (separate commit): async exception handlers; `HTTPException` with non-str detail (JSON-encoded into `detail`) or an unregistered status (title "Client Error"/"Server Error") gives problem details, 1xx/204/304 get no body; 5xx domain errors log the message and send a generic detail; `/health/ready` runs checks concurrently under `READINESS_CHECK_TIMEOUT_SECONDS` (default 2 s, timeout = "failed"); import-linter forbids `domain` → `settings`, and template CI checks that the contract rejects it. |
 | 2026-10-26 | Chunk 2 done (3.8–3.10, 6.3, 6.4; D3, D6, D7) on `feat/architecture-chunk-2`. Decided while implementing: **SQLAlchemy `>=2.0.55,<2.1`**, because `opentelemetry-instrumentation-sqlalchemy` 0.66b1 refuses 2.1 (support merged upstream 2026-10-14 in PR 5120, not released yet; lift the cap with the next contrib release). SQLAlchemy is instrumented globally in `instrument_app`, like httpx2 (per-engine instrumentation works once per process); `create_db_engine` calls `create_async_engine` through its module so the patched function is used. `OTEL_SEMCONV_STABILITY_OPT_IN=http,database`. `DbSessionDep` uses `scope="function"`, because the default scope commits after the response is sent. `DB__URL` is required and checked for the asyncpg scheme; `Settings` sets `hide_input_in_errors` (both variants), so a bad URL isn't echoed into startup logs. Alembic config in `[tool.alembic]` (no `alembic.ini`), date-prefixed revision files, ruff post-write hooks, async `env.py` reading `DB__URL` via `Settings` and logging through `configure_logging`; generated migrations pass ruff and pyright strict. `alembic` is a runtime dependency, but the image doesn't ship migrations yet (Q5). The `integration` marker and `make test-unit` render in both variants (future Valkey tests). DB integration tests use `httpx2.ASGITransport` in the test's loop instead of `TestClient` (asyncpg connections are loop-bound); the container is session-scoped, engines are per test. Test image `postgres:18-alpine` (Q7). Also: `.import_linter_cache/` gitignored in generated services. Open: Q5–Q7. |
 | 2026-10-26 | Q5–Q7 answered → D11 (migrations as a one-off job from the image), D12 (one PostgreSQL in meal-platform compose, database and user per service), D13 (PostgreSQL 18). Template: migrations moved into `infrastructure/db/migrations/` so they ship in the wheel; `python -m <package> migrate` (`__main__` gets `serve` / `migrate` commands; `make migrate` uses it); `pg_advisory_xact_lock` in `env.py`, key from the service name. Verified end to end: a revision made by `make migration` is in the image and applied by `docker run <image> python -m <package> migrate`. meal-platform side is 8.4. |
+| 2026-10-26 | Scope cut: no events in the template → D14; D10 now covers only an opt-in Valkey cache (`with_cache`). New items 1.7a, 3.12–3.15, 5.7, 6.3a; 5.6 drops `add-event-handler`. |
