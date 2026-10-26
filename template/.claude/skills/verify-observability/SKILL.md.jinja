@@ -1,0 +1,33 @@
+---
+name: verify-observability
+description: Check that traces, logs and metrics of this service reach Grafana (Tempo, Loki, Prometheus/Mimir) from meal-platform. Use after adding spans/logs or when telemetry seems missing.
+---
+
+# Verify observability end to end
+
+Prerequisite: meal-platform is up (`make up` there); Grafana LGTM listens on
+`localhost:3000` (UI), `4318` (OTLP HTTP).
+
+1. Run the service: `cp .env.example .env && make run` (or `make docker-run`).
+2. Generate traffic: `curl -s localhost:{{ http_port }}/docs > /dev/null` or call the endpoint
+   you changed. Health probes are excluded from tracing on purpose.
+3. Wait ~10 s (batch exporters), then check each signal through the Grafana API:
+   ```bash
+   # Traces (Tempo): last traces of this service
+   curl -s -G localhost:3000/api/datasources/proxy/uid/tempo/api/search \
+     --data-urlencode 'q={resource.service.name="{{ service_name }}"}' | jq '.traces[:3]'
+
+   # Logs (Loki)
+   curl -s -G localhost:3000/api/datasources/proxy/uid/loki/loki/api/v1/query_range \
+     --data-urlencode 'query={service_name="{{ service_name }}"}' --data-urlencode 'limit=5' | jq '.data.result'
+
+   # Metrics (Prometheus)
+   curl -s -G localhost:3000/api/datasources/proxy/uid/prometheus/api/v1/query \
+     --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="{{ service_name }}"}' | jq '.data.result'
+   ```
+4. In the UI: Explore → Tempo → search by service; open a trace and use "Logs for this span"
+   to confirm logs are linked by `trace_id`.
+
+If nothing arrives: check `OTEL_ENABLED=true`, `OTEL_EXPORTER_OTLP_ENDPOINT`
+(`http://localhost:4318` from host, `http://lgtm:4318` inside compose) and the service's
+stdout for exporter errors.

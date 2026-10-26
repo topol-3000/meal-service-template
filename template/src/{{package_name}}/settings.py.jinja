@@ -1,0 +1,31 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Service configuration, read from environment variables and `.env`.
+
+    OpenTelemetry exporters read the standard `OTEL_*` variables themselves
+    (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`, ...).
+    """
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    service_name: str = "{{ service_name }}"
+    service_version: str = "0.1.0"
+    environment: Literal["local", "test", "dev", "prod"] = "local"
+
+    http_host: str = "0.0.0.0"  # noqa: S104 - runs in a container
+    http_port: int = {{ http_port }}
+
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_format: Literal["json", "console"] = "json"
+
+    otel_enabled: bool = True
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

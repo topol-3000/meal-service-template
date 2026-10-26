@@ -1,0 +1,58 @@
+---
+name: add-event-handler
+description: Publish or consume a Redis Streams event with trace context propagation. Use when a task mentions events, streams, async processing or a long-running operation between services.
+---
+
+# Publish or consume an event (Redis Streams)
+
+Event names and payload schemas are defined in meal-platform `contracts/events/`
+(for example `recipe.import.requested`, `recipe.imported`, `plan.generated`).
+Check the schema there first; add a new one there before writing code.
+
+## Envelope
+
+Every stream entry has these fields (all strings):
+
+| field | meaning |
+|---|---|
+| `event_id` | UUID4, used for idempotency |
+| `event_type` | e.g. `recipe.import.requested`, equals the stream name |
+| `event_version` | `1`, bumped on breaking change |
+| `occurred_at` | ISO 8601 UTC |
+| `producer` | `{{ service_name }}` |
+| `payload` | JSON of the Pydantic payload model |
+| `traceparent`, `tracestate` | W3C trace context, added by `inject_trace_context()` |
+
+## Producer
+
+```python
+from opentelemetry.trace import SpanKind
+from {{ package_name }}.observability import get_tracer, inject_trace_context
+
+with get_tracer(__name__).start_as_current_span(
+    f"{event_type} publish", kind=SpanKind.PRODUCER
+):
+    fields = inject_trace_context({"event_id": ..., "event_type": event_type, ..., "payload": payload.model_dump_json()})
+    await redis.xadd(event_type, fields)
+```
+
+## Consumer
+
+- Use a consumer group named after the service (`{{ service_name }}`), `XREADGROUP` + `XACK`.
+- Start a consumer span with the producer as parent:
+  ```python
+  with tracer.start_as_current_span(
+      f"{event_type} process", context=extract_trace_context(fields), kind=SpanKind.CONSUMER
+  ):
+      ...
+  ```
+- Handlers must be idempotent (store processed `event_id`s or use natural keys).
+- Validate `payload` with the Pydantic model; on validation error log
+  `event.rejected` with `event_id` and ack it (poison message), do not crash the loop.
+- Keep the stream adapter in `infrastructure/`, the handling logic in `application/`.
+
+## Tests
+
+- Unit-test the handler with a fake publisher/port.
+- Assert the trace link with `span_exporter`: consumer span `parent.span_id` equals the
+  producer span id (see `tests/test_observability.py`).

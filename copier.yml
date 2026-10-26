@@ -1,0 +1,68 @@
+# Copier template for FamilyMeal microservices (meal-*).
+# Generate:  copier copy --trust gh:topol-3000/meal-service-template meal-recipes
+# Update:    copier update --trust   (inside a generated service)
+
+_min_copier_version: "9.4"
+_subdirectory: template
+_answers_file: .copier-answers.yml
+_templates_suffix: .jinja
+
+_tasks:
+  - command: uv lock
+    when: "{{ _copier_operation == 'copy' }}"
+  - command: git init --initial-branch=main --quiet
+    when: "{{ _copier_operation == 'copy' }}"
+
+_message_after_copy: |
+  Service {{ service_name }} is ready.
+
+    cd {{ _copier_conf.dst_path }}
+    make install   # uv sync + pre-commit hooks
+    make check     # lint + types + tests
+    make run       # http://localhost:{{ http_port }}/docs
+
+  Start meal-platform first to see traces in Grafana (http://localhost:3000).
+
+service_name:
+  type: str
+  help: Service name (repository name), e.g. meal-recipes
+  validator: >-
+    {% if not (service_name | regex_search('^meal-[a-z][a-z0-9]*(-[a-z0-9]+)*$')) %}
+    Must look like meal-<name>: lowercase letters, digits and dashes
+    {% endif %}
+
+package_name:
+  type: str
+  help: Python package name
+  default: "{{ service_name | replace('-', '_') }}"
+  validator: >-
+    {% if not (package_name | regex_search('^[a-z][a-z0-9_]*$')) %}
+    Must be a valid lowercase Python identifier
+    {% endif %}
+
+description:
+  type: str
+  help: One-line description of the service
+  default: "FamilyMeal {{ service_name | replace('meal-', '') }} service"
+
+http_port:
+  type: int
+  help: HTTP port inside the container and for local `make run`
+  default: 8000
+
+python_version:
+  type: str
+  help: Python version
+  choices:
+    - "3.14"
+  default: "3.14"
+
+github_owner:
+  type: str
+  help: GitHub user or organization that owns the repository
+  default: topol-3000
+
+author_name:
+  type: str
+  help: Author name
+  default: Yevhenii Diemientiev

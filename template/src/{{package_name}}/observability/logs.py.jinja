@@ -1,0 +1,127 @@
+import logging
+import sys
+from functools import lru_cache
+from typing import Any
+
+import structlog
+from opentelemetry import trace
+from opentelemetry._logs import Logger as OTelLogger
+from opentelemetry._logs import SeverityNumber, get_logger_provider
+from structlog.types import EventDict, Processor, WrappedLogger
+
+from {{ package_name }}.settings import Settings
+
+# structlog level -> (OTel severity number, OTel severity text)
+_SEVERITY = {
+    "debug": (SeverityNumber.DEBUG, "DEBUG"),
+    "info": (SeverityNumber.INFO, "INFO"),
+    "warning": (SeverityNumber.WARN, "WARN"),
+    "error": (SeverityNumber.ERROR, "ERROR"),
+    "critical": (SeverityNumber.FATAL, "FATAL"),
+}
+# Keys that become first-class fields of an OTel log record, not attributes.
+_RESERVED = {"event", "level", "timestamp", "exc_info", "trace_id", "span_id"}
+
+
+def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
+    return structlog.stdlib.get_logger(name)
+
+
+def add_trace_context(_: WrappedLogger, __: str, event_dict: EventDict) -> EventDict:
+    """Put the current trace and span ids into every log line (stdout)."""
+    ctx = trace.get_current_span().get_span_context()
+    if ctx.is_valid:
+        event_dict["trace_id"] = format(ctx.trace_id, "032x")
+        event_dict["span_id"] = format(ctx.span_id, "016x")
+    return event_dict
+
+
+@lru_cache(maxsize=256)
+def _otel_logger(name: str) -> OTelLogger:
+    return get_logger_provider().get_logger(name)
+
+
+def _attribute(value: Any) -> str | bool | int | float:
+    return value if isinstance(value, str | bool | int | float) else repr(value)
+
+
+def export_to_otel(_: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
+    """Send the event to the OTel logs pipeline (Loki), linked to the current span."""
+    level = str(event_dict.get("level", method_name)).lower()
+    exc_info = event_dict.get("exc_info")
+    exception: BaseException | None = None
+    if isinstance(exc_info, BaseException):
+        exception = exc_info
+    elif exc_info:
+        exception = sys.exc_info()[1]
+
+    severity_number, severity_text = _SEVERITY.get(level, _SEVERITY["info"])
+    _otel_logger(str(event_dict.get("logger", "app"))).emit(
+        severity_number=severity_number,
+        severity_text=severity_text,
+        body=str(event_dict.get("event", "")),
+        attributes={
+            k: _attribute(v)
+            for k, v in event_dict.items()
+            # "_"-prefixed keys are structlog internals (e.g. `_record` of stdlib records).
+            if k not in _RESERVED and not k.startswith("_")
+        },
+        exception=exception,
+    )
+    return event_dict
+
+
+def configure_logging(settings: Settings) -> None:
+    """Route structlog and stdlib logging (uvicorn, libraries) through one pipeline.
+
+    stdout gets JSON (or colored console output locally) with trace ids;
+    when OTel is enabled every record is also exported over OTLP.
+    """
+    shared: list[Processor] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        add_trace_context,
+        structlog.processors.StackInfoRenderer(),
+    ]
+    if settings.otel_enabled:
+        shared.append(export_to_otel)
+
+    renderer: list[Processor] = (
+        [structlog.dev.ConsoleRenderer()]
+        if settings.log_format == "console"
+        else [structlog.processors.format_exc_info, structlog.processors.JSONRenderer()]
+    )
+
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            *shared,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=shared,
+            processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, *renderer],
+        )
+    )
+
+    root = logging.getLogger()  # noqa: TID251 - configuring the root logger itself
+    root.handlers = [handler]
+    root.setLevel(settings.log_level)
+    # uvicorn installs its own handlers; let its records propagate to ours instead.
+    for name in ("uvicorn", "uvicorn.error"):
+        uvicorn_logger = logging.getLogger(name)  # noqa: TID251
+        uvicorn_logger.handlers = []
+        uvicorn_logger.propagate = True
+    # Access lines are replaced by RequestLoggingMiddleware (structured, with trace ids).
+    access_logger = logging.getLogger("uvicorn.access")  # noqa: TID251
+    access_logger.handlers = []
+    access_logger.propagate = False

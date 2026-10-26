@@ -1,0 +1,107 @@
+import json
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
+
+from {{ package_name }}.main import create_app
+from {{ package_name }}.observability import (
+    configure_logging,
+    extract_trace_context,
+    get_logger,
+    get_tracer,
+    inject_trace_context,
+)
+from {{ package_name }}.settings import Settings
+
+
+def _add_ping_route(app: FastAPI) -> FastAPI:
+    @app.get("/ping")
+    async def ping() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        get_logger("test").info("ping.handled", answer="pong")
+        return {"ping": "pong"}
+
+    return app
+
+
+@pytest.fixture
+def app_with_route(app: FastAPI) -> FastAPI:
+    return _add_ping_route(app)
+
+
+def test_request_creates_server_span(
+    app_with_route: FastAPI, span_exporter: InMemorySpanExporter
+) -> None:
+    with TestClient(app_with_route) as client:
+        client.get("/ping")
+
+    server_spans = [s for s in span_exporter.get_finished_spans() if s.kind == SpanKind.SERVER]
+    assert [s.name for s in server_spans] == ["GET /ping"]
+
+
+def test_health_probes_are_not_traced(
+    client: TestClient, span_exporter: InMemorySpanExporter
+) -> None:
+    client.get("/health/live")
+
+    assert span_exporter.get_finished_spans() == ()
+
+
+def test_log_lines_carry_trace_id(
+    settings: Settings,
+    span_exporter: InMemorySpanExporter,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Build the app inside the test: the log handler binds to sys.stdout at creation,
+    # and capsys replaces sys.stdout only for the test body.
+    app = _add_ping_route(create_app(settings))
+    with TestClient(app) as client:
+        client.get("/ping")
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    ping_log = next(line for line in lines if line["event"] == "ping.handled")
+    server_span = next(s for s in span_exporter.get_finished_spans() if s.kind == SpanKind.SERVER)
+    assert server_span.context is not None
+    assert ping_log["trace_id"] == format(server_span.context.trace_id, "032x")
+    assert ping_log["answer"] == "pong"
+
+
+def test_logs_are_exported_to_otel(
+    settings: Settings, log_exporter: InMemoryLogRecordExporter
+) -> None:
+    configure_logging(settings.model_copy(update={"otel_enabled": True}))
+
+    with get_tracer("test").start_as_current_span("work") as span:
+        get_logger("test").warning("something.odd", recipe_id=42)
+
+    [exported] = log_exporter.get_finished_logs()
+    record = exported.log_record
+    assert record.body == "something.odd"
+    assert record.severity_text == "WARN"
+    assert record.attributes is not None
+    assert record.attributes["recipe_id"] == 42
+    assert record.trace_id == span.get_span_context().trace_id
+
+
+def test_trace_context_survives_message_roundtrip(span_exporter: InMemorySpanExporter) -> None:
+    tracer = get_tracer("test")
+
+    with tracer.start_as_current_span("publish", kind=SpanKind.PRODUCER):
+        headers = inject_trace_context({"event_type": "recipe.import.requested"})
+
+    with tracer.start_as_current_span(
+        "process", context=extract_trace_context(headers), kind=SpanKind.CONSUMER
+    ):
+        pass
+
+    producer, consumer = span_exporter.get_finished_spans()
+    assert headers["event_type"] == "recipe.import.requested"
+    assert "traceparent" in headers
+    assert producer.context is not None
+    assert consumer.context is not None
+    assert consumer.context.trace_id == producer.context.trace_id
+    assert consumer.parent is not None
+    assert consumer.parent.span_id == producer.context.span_id

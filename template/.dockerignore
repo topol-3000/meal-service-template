@@ -1,0 +1,11 @@
+.venv
+.git
+.github
+.claude
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+**/__pycache__
+tests
+.env
