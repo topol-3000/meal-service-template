@@ -6,8 +6,9 @@ _min_copier_version: "9.4"
 _subdirectory: template
 _answers_file: .copier-answers.yml
 _templates_suffix: .jinja
-# Files that exist only with the database (D6) or the cache (D10). Shared files use
-# `{% if with_database %}` / `{% if with_cache %}` blocks.
+# Files that exist only with the database (D6) or the cache (D10), by their rendered path
+# (`caching.md`, not `caching.md.jinja`). Shared files use `{% if with_database %}` /
+# `{% if with_cache %}` blocks.
 _exclude:
   - "{% if not with_database %}src/{{ package_name }}/infrastructure/db{% endif %}"
   - "{% if not with_database %}tests/infrastructure/db{% endif %}"
@@ -15,6 +16,8 @@ _exclude:
   - "{% if not with_cache %}tests/infrastructure/cache{% endif %}"
   - "{% if not with_database %}docs/conventions/persistence.md{% endif %}"
   - "{% if not with_cache %}docs/conventions/caching.md{% endif %}"
+  - "{% if not with_database %}.claude/skills/add-repository{% endif %}"
+  - "{% if not with_cache %}.claude/skills/add-cache{% endif %}"
 
 _tasks:
   - command: uv lock

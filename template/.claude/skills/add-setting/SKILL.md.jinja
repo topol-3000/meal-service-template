@@ -1,0 +1,118 @@
+---
+name: add-setting
+description: Add or change a configuration value of this service (an environment variable read by settings.py), with its .env.example entry, its validation tests and the component that receives it. Use when code needs a value that differs per environment, such as a URL, timeout, limit or secret.
+---
+
+# Add a setting
+
+All configuration is environment variables read once by `Settings` (`settings.py`). The
+rules are in [settings.md](../../../docs/conventions/settings.md).
+
+## Steps
+
+1. **Where it goes.** A value for one adapter is a field of that adapter's sub-model
+   (`RECIPES_API__TIMEOUT_SECONDS`); add the sub-model when the adapter has none. A
+   service-wide value is a flat field of `Settings`
+   ([structure](../../../docs/conventions/settings.md#structure)).
+2. **Required or default.** A value with a safe default gets it; a URL or a secret without
+   one is required. Use a constrained type (`PositiveFloat`, `HttpUrl`, `Literal`) and
+   `SecretStr` for secrets.
+3. **A required field** also touches `get_settings()`, the `settings` fixture in
+   `tests/conftest.py` and an autouse fixture in `tests/test_settings.py`: follow
+   [the required-setting example](../../../docs/conventions/settings.md#example-a-required-setting).
+4. **`.env.example`**: the variable with a comment; a default is shown commented out.
+5. **Pass the slice on.** The component gets its sub-model in `__init__` or its factory, and
+   the provider in `api/dependencies.py` passes `settings.<field>` to it
+   ([how settings reach components](../../../docs/conventions/settings.md#how-settings-reach-components)).
+   Nothing but the composition root calls `get_settings()` or reads `os.environ`.
+6. **Tests.** In `tests/test_settings.py`: the variable is read, the default holds, invalid
+   values are rejected (`pytest.raises(ValidationError, match=...)` naming the field). In
+   the component's tests: it behaves according to the value, built from the slice directly.
+7. `make check`.
+
+## Worked example
+
+A shorter timeout for calls to meal-recipes than the shared client's 10 s
+([timeouts](../../../docs/conventions/errors.md#timeouts)). It builds on `RecipesApiSettings`
+from [settings.md](../../../docs/conventions/settings.md#example-a-required-setting) and
+`HttpRecipeReader` from [errors.md](../../../docs/conventions/errors.md#adapters-convert-library-errors).
+
+The field, with a default, in the adapter's existing sub-model:
+
+```diff
+--- src/{{ package_name }}/settings.py
++++ src/{{ package_name }}/settings.py
+@@
+     base_url: HttpUrl
++    # Per call; shorter than the shared client's: a lookup should not hold a request for 10 s.
++    timeout_seconds: PositiveFloat = 2.0
+```
+
+The adapter keeps it from its slice and passes it with each request:
+
+```diff
+--- src/{{ package_name }}/infrastructure/recipes_api.py
++++ src/{{ package_name }}/infrastructure/recipes_api.py
+@@
+         self._base_url = str(settings.base_url).rstrip("/")
++        self._timeout = settings.timeout_seconds
+@@
+-            response = await self._client.get(f"{self._base_url}/recipes/{recipe_id}")
++            response = await self._client.get(
++                f"{self._base_url}/recipes/{recipe_id}", timeout=self._timeout
++            )
+```
+
+```diff
+--- .env.example
++++ .env.example
+@@
+ RECIPES_API__BASE_URL=http://localhost:8001
++# Seconds per call to meal-recipes; default shown.
++# RECIPES_API__TIMEOUT_SECONDS=2
+```
+
+The variable, its default and its validation:
+
+```python
+# add to tests/test_settings.py
+def test_recipes_api_timeout_has_a_default_and_can_be_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _settings_from_env().recipes_api.timeout_seconds == 2.0
+
+    monkeypatch.setenv("RECIPES_API__TIMEOUT_SECONDS", "0.5")
+
+    assert _settings_from_env().recipes_api.timeout_seconds == 0.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "soon"])
+def test_recipes_api_timeout_must_be_a_positive_number(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("RECIPES_API__TIMEOUT_SECONDS", value)
+
+    with pytest.raises(ValidationError, match=r"recipes_api\.timeout_seconds"):
+        _settings_from_env()
+```
+
+And the adapter uses the value it was given:
+
+```python
+# add to tests/infrastructure/test_recipes_api.py
+async def test_each_call_has_the_configured_timeout() -> None:
+    timeouts: list[object] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        timeouts.append(request.extensions["timeout"])
+        return httpx2.Response(200, json=_payload())
+
+    settings = RecipesApiSettings(base_url=HttpUrl("http://recipes.test"), timeout_seconds=0.5)
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        await HttpRecipeReader(client, settings).get(_RECIPE.id)
+
+    assert timeouts == [{"connect": 0.5, "read": 0.5, "write": 0.5, "pool": 0.5}]
+```
+
+The provider needs no change: it already passes `settings.recipes_api` (see
+`add-external-client`).

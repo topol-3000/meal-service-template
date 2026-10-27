@@ -20,8 +20,9 @@ A generated service has:
 - **structlog**: JSON logs with `trace_id`/`span_id`, the same records exported to Loki
 - **ruff**, **pyright** strict, **pytest** (+ coverage, tests asserting spans and logs), **pre-commit**
 - **Dockerfile** (multi-stage, uv, non-root, healthcheck) and **GitHub Actions** CI publishing to GHCR
-- **AGENTS.md** (+ `CLAUDE.md` importing it) and Claude Code **skills**:
-  `add-endpoint`, `verify-observability`
+- **AGENTS.md** (+ `CLAUDE.md` importing it), `docs/` (architecture, stack, conventions) and
+  Claude Code **skills**: `add-feature`, `add-use-case`, `add-endpoint`, `add-external-client`,
+  `add-setting`, `add-repository` (database), `add-cache` (cache), `verify-observability`
 
 Update a service to the latest template: `make update-template` inside the service.
 

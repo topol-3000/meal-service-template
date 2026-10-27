@@ -142,7 +142,6 @@ Dependency direction: `api → application → domain ← infrastructure`, check
 
 - Contracts: when the HTTP API changes, update its OpenAPI copy in meal-platform
   `contracts/openapi/` in the same change.
-
 - Ask before: adding a new runtime dependency, changing a contract, changing CI or Dockerfile,
   touching anything in `observability/` beyond adding helpers.
 - Never: commit secrets or `.env`, disable or skip tests to get green, weaken pyright or ruff
@@ -168,5 +167,6 @@ Read the one that matches the task before writing code:
 {%- endif %}
 - [docs/conventions/testing.md](docs/conventions/testing.md): test philosophy, fixtures, fakes, integration tests
 
-Task recipes (skills) in `.claude/skills/`, for when the task matches: `add-endpoint`,
-`verify-observability`.
+Skills (`.claude/skills/`) are step-by-step procedures; use the one that matches the task:
+`add-feature` (spans several layers), `add-use-case`, `add-endpoint`, `add-external-client`,
+`add-setting`{% if with_database %}, `add-repository`{% endif %}{% if with_cache %}, `add-cache`{% endif %}, `verify-observability`.

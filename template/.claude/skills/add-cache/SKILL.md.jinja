@@ -1,0 +1,87 @@
+---
+name: add-cache
+description: Cache a slow or remote lookup in Valkey (cache-aside around an existing port, with key, TTL, Pydantic value model, invalidation, an in-memory fake and Valkey integration tests). Use when a read that works already should be served faster; never to store data that exists nowhere else.
+---
+
+# Add a cache
+
+The cache is an optimisation in front of a port that already works: the use case reads the
+cache, on a miss reads the source of truth and writes the value back. Valkey being down
+makes every lookup a miss, never an error. The rules are in
+[caching.md](../../../docs/conventions/caching.md#rules).
+
+## Steps
+
+1. **Staleness first.** Decide how long a user may see an old value; that is the TTL
+   ([staleness](../../../docs/conventions/caching.md#staleness)). If "never", don't cache.
+2. **Port** `<Thing>Cache` in `domain/<feature>/ports.py`: `get` returns the domain object
+   or `None`, plus `put` and `forget`.
+3. **Adapter** in `infrastructure/cache/<feature>.py` wrapping `ValkeyCache`: the key
+   prefix `{{ service_name }}:<feature>:v1`, a Pydantic value model, a value that doesn't
+   parse is a miss logged as `cache.invalid_value`, `ttl_seconds=` only when the TTL is not
+   the default. Bump the version when the value model changes. No personal data in keys.
+4. **Use case** does the cache-aside through both ports (see `add-use-case`); code that
+   changes the source of truth calls `forget` afterwards.
+5. **Wire it.** The use case's provider in `api/dependencies.py` takes `cache: CacheDep`
+   and wraps it in the adapter. Use cases never see `CacheDep` or `ValkeyCache`.
+6. **Tests.** A `Fake<Thing>Cache` in `tests/fakes/<feature>.py`; use-case tests for a
+   miss (source read, cache filled), a hit (source not read) and a failure (nothing
+   cached). Adapter tests against Valkey, marked `integration`, with `cache_settings` and
+   `cache_client`: round trip, `forget`, key and TTL, an unreadable value
+   ([integration tests](../../../docs/conventions/testing.md#integration-tests)).
+7. `make check` (needs Docker). Watch the hit ratio afterwards
+   ([hit ratio](../../../docs/conventions/caching.md#hit-ratio), `verify-observability`).
+
+## Worked example
+
+[Caching recipe lookups](../../../docs/conventions/caching.md#example-caching-recipe-lookups)
+goes through steps 2–6: `RecipeCache`, `ValkeyRecipeCache`, `FindRecipe`,
+`FakeRecipeCache` and the tests. Here is its provider (step 5), with meal-recipes' API from
+[errors.md](../../../docs/conventions/errors.md#adapters-convert-library-errors) as the
+source of truth:
+
+```python
+# add to src/{{ package_name }}/api/dependencies.py
+from {{ package_name }}.application.recipes.find_recipe import FindRecipe
+from {{ package_name }}.infrastructure.cache.recipes import ValkeyRecipeCache
+from {{ package_name }}.infrastructure.recipes_api import HttpRecipeReader
+
+
+def get_find_recipe(
+    http_client: HttpClientDep, settings: SettingsDep, cache: CacheDep
+) -> FindRecipe:
+    return FindRecipe(HttpRecipeReader(http_client, settings.recipes_api), ValkeyRecipeCache(cache))
+
+
+type FindRecipeDep = Annotated[FindRecipe, Depends(get_find_recipe)]
+```
+
+With everything real except the two servers, a lookup still works while Valkey is down
+(the `settings` fixture points the cache at a closed port):
+
+```python
+# tests/api/test_dependencies.py
+from uuid import uuid4
+
+import httpx2
+
+from {{ package_name }}.api.dependencies import get_find_recipe
+from {{ package_name }}.domain.recipes.recipe import Recipe
+from {{ package_name }}.infrastructure.cache.valkey import ValkeyCache, create_cache_client
+from {{ package_name }}.settings import Settings
+
+_SOUP = Recipe(id=uuid4(), title="Lentil soup", servings=4)
+
+
+async def test_while_valkey_is_down_recipes_come_from_meal_recipes(settings: Settings) -> None:
+    def recipes_api(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"id": str(_SOUP.id), "title": _SOUP.title, "servings": 4})
+
+    cache_client = create_cache_client(settings.cache)
+    cache = ValkeyCache(cache_client, default_ttl_seconds=60)
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(recipes_api)) as http_client:
+        find_recipe = get_find_recipe(http_client, settings, cache)
+
+        assert await find_recipe(_SOUP.id) == _SOUP
+    await cache_client.aclose()
+```

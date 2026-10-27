@@ -29,6 +29,18 @@ DEPENDS = {
     "docs/conventions/testing.md": ["docs/architecture.md"],
     "docs/conventions/persistence.md": ["docs/conventions/models.md"],
     "docs/conventions/caching.md": ["docs/conventions/models.md"],
+    # The skills extend the docs' `recipes` example into one feature (see add-feature).
+    ".claude/skills/add-use-case/SKILL.md": ["docs/conventions/models.md"],
+    ".claude/skills/add-setting/SKILL.md": ["docs/conventions/errors.md"],
+    ".claude/skills/add-external-client/SKILL.md": [
+        ".claude/skills/add-setting/SKILL.md",
+        ".claude/skills/add-use-case/SKILL.md",
+    ],
+    ".claude/skills/add-endpoint/SKILL.md": [".claude/skills/add-external-client/SKILL.md"],
+    ".claude/skills/add-cache/SKILL.md": [
+        "docs/conventions/caching.md",
+        "docs/conventions/errors.md",
+    ],
 }
 FENCE = re.compile(r"^```(\w*)\n(.*?)^```", re.M | re.S)
 

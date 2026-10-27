@@ -78,13 +78,14 @@ EXTERNAL = {
 TERMS = {
     "MONITOR", "SLOWLOG", "SCAN", "REINDEX CONCURRENTLY", "INVALID", "alembic_version", ":name",
     "snake_case", "PascalCase", "UPPER_SNAKE", "**kwargs", "contracts/", "contracts/openapi/",
+    "make up",
 }
 # Names in a naming-style example, not references to code. Kept short on purpose.
 ILLUSTRATIVE = {
     "recipe.imported", "recipes.imported", "plan.generate", "recipe.id", "GeneratePlan",
     "generate_plan.py", "RecipeRepositoryInterface", "test_plan_days_2", "LlmSettings",
     "LLM__API_KEY", "api_key: SecretStr", "if provider == ...", "note: str | None = None",
-    "utils.py", "helpers.py",
+    "utils.py", "helpers.py", "recipes_imported_total", "RecipesApiClient",
 }
 # Semantic-convention and OTel names set by libraries, not by this code.
 OTEL = {
