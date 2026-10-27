@@ -1,0 +1,175 @@
+# Settings
+
+All configuration comes from environment variables (and a local `.env`), read once by
+`Settings` in `settings.py` (pydantic-settings). There are no config files and no other
+sources.
+
+## Structure
+
+- **Sub-model per adapter.** Each adapter's settings are a frozen `BaseModel`
+  (`model_config = ConfigDict(frozen=True)`) held by one field of `Settings`. With
+  `env_nested_delimiter="__"`, field `http_client` → sub-field `timeout_seconds` is read from
+  `HTTP_CLIENT__TIMEOUT_SECONDS`. The sub-model's docstring names the adapter and the prefix.
+- **Flat fields stay flat.** Service-wide values (`HTTP_PORT`, `LOG_LEVEL`, ...) are fields of
+  `Settings` itself.
+- **Required or default.** A value with a safe default has one (timeouts, pool sizes). A
+  value without one (a URL, a secret) is required: the service does not start without it,
+  and the error names the field. `hide_input_in_errors=True` keeps the value itself out of
+  that error, since it may be a secret.
+- **Secrets are `SecretStr`.** Call `.get_secret_value()` only where the value is used (the
+  client or engine factory). Never log a secret or put it on a span.
+- **Constrained types.** `PositiveFloat`, `PositiveInt`, `Literal[...]`, `HttpUrl`, plus a
+  `field_validator` for rules the type can't express{% if with_database %}, like
+  `DatabaseSettings` requiring the `postgresql+asyncpg://` scheme{% endif %}.
+
+The settings that exist now:
+
+| Variable | Field | Default |
+|---|---|---|
+| `SERVICE_NAME`, `SERVICE_VERSION` | `service_name`, `service_version` | `{{ service_name }}`, `0.1.0` |
+| `ENVIRONMENT` | `environment` | `local` |
+| `HTTP_HOST`, `HTTP_PORT` | `http_host`, `http_port` | `0.0.0.0`, `{{ http_port }}` |
+| `LOG_LEVEL`, `LOG_FORMAT` | `log_level`, `log_format` | `INFO`, `json` |
+| `OTEL_ENABLED` | `otel_enabled` | `true` |
+| `READINESS_CHECK_TIMEOUT_SECONDS` | `readiness_check_timeout_seconds` | `2.0` |
+| `HTTP_CLIENT__TIMEOUT_SECONDS`, `HTTP_CLIENT__CONNECT_TIMEOUT_SECONDS`, `HTTP_CLIENT__MAX_CONNECTIONS` | `HttpClientSettings` | `10.0`, `5.0`, `100` |
+{%- if with_database %}
+| `DB__URL` | `DatabaseSettings.url` (`SecretStr`) | required |
+| `DB__POOL_SIZE`, `DB__MAX_OVERFLOW` | `DatabaseSettings` | `5`, `10` |
+{%- endif %}
+{%- if with_cache %}
+| `CACHE__URL` | `CacheSettings.url` (`SecretStr`) | required |
+| `CACHE__DEFAULT_TTL_SECONDS`, `CACHE__CONNECT_TIMEOUT_SECONDS`, `CACHE__TIMEOUT_SECONDS` | `CacheSettings` | `300`, `0.5`, `0.5` |
+{%- endif %}
+
+OpenTelemetry's exporters read the standard `OTEL_*` variables themselves
+(`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_METRIC_EXPORT_INTERVAL`, ...); they are not fields.
+
+## How settings reach components
+
+- `get_settings()` is called only at the edges: `create_app()` (when no `Settings` is
+  passed), `__main__.py`{% if with_database %} and `migrations/env.py`{% endif %}. Nothing else
+  calls it or reads `os.environ`.
+- A component receives only its slice in `__init__` or its factory:
+  `create_http_client(settings.http_client)`{% if with_database %}, `create_db_engine(settings.db)`{% endif %}{% if with_cache %}, `create_cache_client(settings.cache)`{% endif %}.
+  It never gets the whole `Settings`.
+- Routes that need a value use `SettingsDep`; providers in `api/dependencies.py` pass slices
+  on to adapters.
+- Tests build `Settings(...)` directly: the `settings` fixture in `tests/conftest.py`, and
+  `settings.model_copy(update=...)` for a variation{% if with_database %} (as `db_settings` does){% endif %}.
+
+## Example: a required setting
+
+meal-recipes' base URL, for an adapter that calls it (the adapter is in
+[errors.md](errors.md#adapters-convert-library-errors)). A required field touches four files.
+
+`settings.py`: the sub-model, the field, and `get_settings()`, which pyright now sees
+called without a required argument:
+
+```diff
+--- src/{{ package_name }}/settings.py
++++ src/{{ package_name }}/settings.py
+@@
+{%- if with_database or with_cache %}
+     Field,
++    HttpUrl,
+{%- else %}
+-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PositiveInt
++from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PositiveFloat, PositiveInt
+{%- endif %}
+@@
++class RecipesApiSettings(BaseModel):
++    """meal-recipes over HTTP (`infrastructure/recipes_api.py`). Env: `RECIPES_API__<FIELD>`."""
++
++    model_config = ConfigDict(frozen=True)
++
++    base_url: HttpUrl
++
++
+ class Settings(BaseSettings):
+@@
+     http_client: HttpClientSettings = Field(default_factory=HttpClientSettings)
++    # Required: the service does not start without RECIPES_API__BASE_URL.
++    recipes_api: RecipesApiSettings
+@@
+ def get_settings() -> Settings:
+{%- if with_database or with_cache %}
+-    # Required fields ({{ ((["`db`"] if with_database else []) + (["`cache`"] if with_cache else [])) | join(", ") }}) come from the environment, which pyright can't see.
++    # Required fields come from the environment, which pyright can't see.
+{%- else %}
+-    return Settings()
++    # Required fields come from the environment, which pyright can't see.
++    return Settings()  # pyright: ignore[reportCallIssue]
+{%- endif %}
+```
+
+`tests/conftest.py`: unit tests get a URL where nothing listens, so a test that calls the
+real adapter by mistake fails at once:
+
+```diff
+--- tests/conftest.py
++++ tests/conftest.py
+@@
+{%- if with_database or with_cache %}
+-from pydantic import SecretStr
++from pydantic import HttpUrl, SecretStr
+{%- else %}
+ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
++from pydantic import HttpUrl
+{%- endif %}
+@@
+-from {{ package_name }}.settings import {% if with_cache %}CacheSettings, {% endif %}{% if with_database %}DatabaseSettings, {% endif %}Settings
++from {{ package_name }}.settings import {% if with_cache %}CacheSettings, {% endif %}{% if with_database %}DatabaseSettings, {% endif %}RecipesApiSettings, Settings
+@@
+{%- if with_database or with_cache %}
+         otel_enabled=False,
++        recipes_api=RecipesApiSettings(base_url=HttpUrl("http://127.0.0.1:1")),
+{%- else %}
+-    return Settings(environment="test", log_format="json", otel_enabled=False)
++    return Settings(
++        environment="test",
++        log_format="json",
++        otel_enabled=False,
++        recipes_api=RecipesApiSettings(base_url=HttpUrl("http://127.0.0.1:1")),
++    )
+{%- endif %}
+```
+
+`tests/test_settings.py` reads settings from the environment, so it sets the variable for
+every test and checks the new rules:
+
+```python
+# add to tests/test_settings.py
+@pytest.fixture(autouse=True)
+def recipes_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Settings require RECIPES_API__BASE_URL; tests about it change or delete it.
+    monkeypatch.setenv("RECIPES_API__BASE_URL", "http://recipes:8000")
+
+
+def test_recipes_api_base_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RECIPES_API__BASE_URL")
+
+    with pytest.raises(ValidationError, match="recipes_api"):
+        _settings_from_env()
+
+
+def test_recipes_api_base_url_must_be_an_http_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RECIPES_API__BASE_URL", "recipes:8000")
+
+    with pytest.raises(ValidationError, match=r"recipes_api\.base_url"):
+        _settings_from_env()
+```
+
+`.env.example`: every variable, with a comment:
+
+```diff
+--- .env.example
++++ .env.example
+@@
+ # HTTP_CLIENT__MAX_CONNECTIONS=100
++
++# meal-recipes API, required: where it listens locally (its HTTP_PORT).
++RECIPES_API__BASE_URL=http://localhost:8001
+```
+
+The provider then passes the slice on: `HttpRecipeReader(http_client, settings.recipes_api)`.

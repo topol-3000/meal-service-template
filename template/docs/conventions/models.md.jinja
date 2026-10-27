@@ -1,0 +1,160 @@
+# Models
+
+## Three kinds of models
+
+| Kind | What | Where | Built with |
+|---|---|---|---|
+| API schemas | request and response bodies | `api/<feature>.py` | Pydantic, subclass `ApiModel` (`api/schemas.py`) |
+| Domain models | entities and value objects, with their rules | `domain/<feature>/` | frozen `@dataclass(frozen=True, slots=True)` |
+{%- if with_database %}
+| Persistence models | table rows | `infrastructure/db/models.py` | SQLAlchemy, subclass `Base` |
+{%- endif %}
+
+Pydantic is for boundaries, where untrusted data comes in or goes out: API schemas,
+payloads of other services and of the LLM (parsed in the adapter){% if with_cache %},
+cached values (in the cache adapter, see [caching.md](caching.md)){% endif %} and settings.
+Inside the service the domain uses plain frozen dataclasses: no validation framework, no
+serialisation concerns, and `domain` stays free of framework imports.
+
+Each kind changes for its own reason (an API version, a business rule{% if with_database %}, a column{% endif %}),
+so they are separate classes even when the fields look alike. Domain objects never leave
+through HTTP directly, and API schemas never reach the application layer.
+
+## Domain models
+
+- Entities and value objects are `@dataclass(frozen=True, slots=True)`. Change one by
+  building a new one (`dataclasses.replace`).
+- Invariants are checked in `__post_init__` and raise a domain error (see
+  [errors.md](errors.md)), so no entry point (HTTP, a job, a test) can build an invalid one.
+- Ids: `type RecipeId = UUID` names the role; use `NewType` when mixing two kinds of id up
+  must be a type error.
+- Ports (Protocols) for a feature sit next to its models in `domain/<feature>/ports.py`.
+
+The example used across these docs:
+
+```python
+# src/{{ package_name }}/domain/recipes/recipe.py
+from dataclasses import dataclass
+from uuid import UUID
+
+from {{ package_name }}.domain.errors import ConflictError, NotFoundError, ValidationError
+
+type RecipeId = UUID
+
+MAX_SERVINGS = 50
+
+
+class RecipeNotFoundError(NotFoundError):
+    def __init__(self, recipe_id: RecipeId) -> None:
+        super().__init__(f"Recipe {recipe_id} does not exist")
+
+
+class RecipeAlreadyExistsError(ConflictError):
+    def __init__(self, recipe_id: RecipeId) -> None:
+        super().__init__(f"Recipe {recipe_id} exists already")
+
+
+class InvalidServingsError(ValidationError):
+    def __init__(self, servings: int) -> None:
+        super().__init__(f"A recipe serves 1 to {MAX_SERVINGS} people, not {servings}")
+
+
+@dataclass(frozen=True, slots=True)
+class Recipe:
+    id: RecipeId
+    title: str
+    servings: int
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.servings <= MAX_SERVINGS:
+            raise InvalidServingsError(self.servings)
+```
+
+```python
+# src/{{ package_name }}/domain/recipes/ports.py
+from typing import Protocol
+
+from {{ package_name }}.domain.recipes.recipe import Recipe, RecipeId
+
+
+class RecipeReader(Protocol):
+    async def get(self, recipe_id: RecipeId) -> Recipe:
+        """Raises `RecipeNotFoundError` when there is no such recipe."""
+        ...
+
+
+class RecipeWriter(Protocol):
+    async def add(self, recipe: Recipe) -> None:
+        """Raises `RecipeAlreadyExistsError` when the id is taken."""
+        ...
+```
+
+## API schemas
+
+- Subclass `ApiModel`: `extra="forbid"` rejects unknown fields instead of dropping them, and
+  `frozen=True` makes instances immutable.
+- Separate request and response models (`CreateRecipeRequest`, `RecipeResponse`), even when
+  they share fields: they change for different reasons.
+- Constraints go in the type: `Annotated[int, Field(ge=1, le=50)]`. Constraints used by
+  several schemas become a named alias in `api/schemas.py`.
+- Optional fields are explicit: `note: str | None = None`.
+- Mapping lives on the schema: `to_domain()` on a request, `from_domain()` on a response.
+  The route calls them; nothing else maps between API and domain.
+
+A shared constraint:
+
+```python
+# add to src/{{ package_name }}/api/schemas.py
+from typing import Annotated
+
+from pydantic import StringConstraints
+
+# A one-line text field: surrounding spaces removed, then 1 to 200 characters.
+type ShortText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+```
+
+The schemas of a feature live next to its router (routers: see
+[architecture.md](../architecture.md#how-dependencies-reach-routes){% if with_database %}; the
+recipes router is in [persistence.md](persistence.md#example-a-recipes-table){% endif %}):
+
+```python
+# src/{{ package_name }}/api/recipes.py
+from typing import Annotated, Self
+from uuid import UUID
+
+from pydantic import Field
+
+from {{ package_name }}.api.schemas import ApiModel, ShortText
+from {{ package_name }}.domain.recipes.recipe import MAX_SERVINGS, Recipe, RecipeId
+
+
+class CreateRecipeRequest(ApiModel):
+    title: ShortText
+    servings: Annotated[int, Field(ge=1, le=MAX_SERVINGS)]
+
+    def to_domain(self, recipe_id: RecipeId) -> Recipe:
+        return Recipe(id=recipe_id, title=self.title, servings=self.servings)
+
+
+class RecipeResponse(ApiModel):
+    id: UUID
+    title: str
+    servings: int
+
+    @classmethod
+    def from_domain(cls, recipe: Recipe) -> Self:
+        return cls(id=recipe.id, title=recipe.title, servings=recipe.servings)
+```
+
+`servings` is checked twice on purpose: the schema gives the client a 422 that names the
+field, and the entity keeps the rule for every other way in.
+{%- if with_database %}
+
+## Persistence models
+
+ORM classes subclass `Base` in `infrastructure/db/models.py` and never leave
+`infrastructure/`: the repository maps rows to domain objects and back, in one place. See
+[persistence.md](persistence.md).
+{%- endif %}

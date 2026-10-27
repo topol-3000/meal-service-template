@@ -24,7 +24,7 @@ description: Add an HTTP endpoint to this service following the layering, tracin
 3. **Unit test the use case** in `tests/application/` with an in-memory fake for each port.
 4. **Router.** Add or extend a module in `src/{{ package_name }}/api/`. Request and response
    are Pydantic models defined next to the router, never domain objects directly.
-   Map domain errors to `HTTPException` here. Include the router in `main.py`.
+   Include the router in `main.py`.
 5. **API test** with the `client` fixture: happy path plus one error case.
 6. **Contract.** If the API is used by another service, update the OpenAPI copy in
    meal-platform `contracts/openapi/{{ service_name }}.yaml` (`/openapi.json` of the running app).

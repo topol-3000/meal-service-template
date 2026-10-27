@@ -1,0 +1,197 @@
+# Errors
+
+## The hierarchy
+
+The domain and application layers raise the classes in `domain/errors.py`, or a feature
+error that subclasses one of them:
+
+| Base class | Means | HTTP status |
+|---|---|---|
+| `DomainError` | a business rule was broken (base of all) | 400 |
+| `NotFoundError` | the entity does not exist | 404 |
+| `ConflictError` | clashes with the current state: duplicate, stale version | 409 |
+| `ValidationError` | well-formed input that breaks a business rule | 422 |
+| `ExternalServiceError` | a service we depend on failed{% if with_database %} (also the database){% endif %} | 502 |
+
+Feature errors subclass the base that fits and put the details in the message:
+`class RecipeNotFoundError(NotFoundError)` (see [models.md](models.md#domain-models)).
+Callers catch the specific class; HTTP sees the base.
+
+Never signal an error by returning `None`, `False` or an error code. Return `None` only
+when "nothing" is a normal answer (a cache miss).
+
+## One place maps errors to HTTP
+
+`register_error_handlers()` in `api/errors.py` is called by `create_app()` and turns every
+exception into an RFC 9457 problem-details response (`ProblemDetails`, media type
+`application/problem+json`):
+
+```json
+{"type": "about:blank", "title": "Not Found", "status": 404,
+ "detail": "Recipe 0c6c... does not exist", "instance": "/recipes/0c6c..."}
+```
+
+- **Domain errors** map through `_DOMAIN_ERROR_STATUS`. Starlette picks the handler of the
+  closest registered base class, so a new feature error needs no new code.
+- **4xx domain errors** send their message as `detail`: write it for the client, without
+  internals or personal data. They are logged at info level as `http.domain_error`.
+- **5xx domain errors** (`ExternalServiceError`) log their message as a warning and send
+  the generic `SERVER_ERROR_DETAIL` instead: the message may name hosts or upstream answers.
+- **Request validation errors** (FastAPI's) become a 422 whose `errors` list each field's
+  `loc` and `msg`. The submitted values are left out; they may be secrets.
+- **`HTTPException`** from FastAPI itself (unknown route, wrong method) also becomes problem
+  details, keeping its headers (`Allow` on a 405).
+- **Anything else** is a 500 with no detail. That handler does not log: the server logs the
+  traceback and the request span records the exception.
+
+Routes do not catch errors to map them and do not raise `HTTPException` for domain
+conditions: they let the domain error propagate. A missing recipe is
+`raise RecipeNotFoundError(recipe_id)` in the use case or adapter, never
+`raise HTTPException(404)` in the route.
+
+## Adapters convert library errors
+
+Library exceptions (httpx2{% if with_database %}, SQLAlchemy{% endif %}{% if with_cache %}, redis-py{% endif %}, the LLM client) stop at the adapter. The adapter
+raises a domain error with `raise ... from exc`, so the cause stays in the traceback and on
+the span. The application layer never sees a library exception.
+
+An adapter for meal-recipes' API, implementing `RecipeReader` from
+[models.md](models.md#domain-models) with the settings slice from
+[settings.md](settings.md#example-a-required-setting):
+
+```python
+# src/{{ package_name }}/infrastructure/recipes_api.py
+from http import HTTPStatus
+from typing import Annotated
+from uuid import UUID
+
+import httpx2
+import pydantic
+
+from {{ package_name }}.domain.errors import ExternalServiceError
+from {{ package_name }}.domain.recipes.recipe import (
+    MAX_SERVINGS,
+    Recipe,
+    RecipeId,
+    RecipeNotFoundError,
+)
+from {{ package_name }}.settings import RecipesApiSettings
+
+
+class _RecipePayload(pydantic.BaseModel):
+    """What meal-recipes sends. Unknown fields are ignored, so it can add some."""
+
+    id: UUID
+    title: str
+    servings: Annotated[int, pydantic.Field(ge=1, le=MAX_SERVINGS)]
+
+
+class HttpRecipeReader:
+    """`RecipeReader` over meal-recipes' HTTP API."""
+
+    def __init__(self, client: httpx2.AsyncClient, settings: RecipesApiSettings) -> None:
+        self._client = client
+        self._base_url = str(settings.base_url).rstrip("/")
+
+    async def get(self, recipe_id: RecipeId) -> Recipe:
+        try:
+            response = await self._client.get(f"{self._base_url}/recipes/{recipe_id}")
+        except httpx2.HTTPError as exc:  # refused, timed out, ...
+            raise ExternalServiceError("meal-recipes did not answer") from exc
+        if response.status_code == HTTPStatus.NOT_FOUND:
+            raise RecipeNotFoundError(recipe_id)
+        if response.is_error:
+            raise ExternalServiceError(f"meal-recipes answered {response.status_code}")
+        try:
+            payload = _RecipePayload.model_validate_json(response.content)
+        except pydantic.ValidationError as exc:
+            raise ExternalServiceError("meal-recipes sent an unexpected recipe") from exc
+        return Recipe(id=payload.id, title=payload.title, servings=payload.servings)
+```
+
+The payload model applies the domain's limits, so bad upstream data becomes an
+`ExternalServiceError` (502), not an `InvalidServingsError` (422) blamed on the client.
+Its tests use `httpx2.MockTransport`, so they need no network:
+
+```python
+# tests/infrastructure/test_recipes_api.py
+from collections.abc import Callable
+from uuid import uuid4
+
+import httpx2
+import pytest
+from pydantic import HttpUrl
+
+from {{ package_name }}.domain.errors import DomainError, ExternalServiceError
+from {{ package_name }}.domain.recipes.recipe import Recipe, RecipeNotFoundError
+from {{ package_name }}.infrastructure.recipes_api import HttpRecipeReader
+from {{ package_name }}.settings import RecipesApiSettings
+
+type Handler = Callable[[httpx2.Request], httpx2.Response]
+
+_SETTINGS = RecipesApiSettings(base_url=HttpUrl("http://recipes.test"))
+_RECIPE = Recipe(id=uuid4(), title="Lentil soup", servings=4)
+
+
+def _payload(**changes: object) -> dict[str, object]:
+    return {"id": str(_RECIPE.id), "title": _RECIPE.title, "servings": _RECIPE.servings} | changes
+
+
+async def _get(handler: Handler) -> Recipe:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        return await HttpRecipeReader(client, _SETTINGS).get(_RECIPE.id)
+
+
+async def test_reads_the_recipe_by_id() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert str(request.url) == f"http://recipes.test/recipes/{_RECIPE.id}"
+        return httpx2.Response(200, json=_payload())
+
+    assert await _get(handler) == _RECIPE
+
+
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        (httpx2.Response(404), RecipeNotFoundError),
+        (httpx2.Response(500), ExternalServiceError),
+        (httpx2.Response(200, text="<html>"), ExternalServiceError),
+        (httpx2.Response(200, json=_payload(id="1")), ExternalServiceError),
+        (httpx2.Response(200, json=_payload(servings=0)), ExternalServiceError),
+    ],
+    ids=["not found", "server error", "not json", "bad id", "servings out of range"],
+)
+async def test_failures_become_domain_errors(
+    response: httpx2.Response, error: type[DomainError]
+) -> None:
+    with pytest.raises(error):
+        await _get(lambda _: response)
+
+
+async def test_an_unreachable_service_is_an_external_service_error() -> None:
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection refused", request=request)
+
+    with pytest.raises(ExternalServiceError, match="did not answer"):
+        await _get(refuse)
+```
+{%- if with_database %}
+
+Repositories do the same with SQLAlchemy: an `IntegrityError` on a unique key becomes a
+`ConflictError` subclass (see [persistence.md](persistence.md#repositories)).
+{%- endif %}
+{%- if with_cache %}
+
+The cache is the exception that proves the rule: `ValkeyCache` turns an unavailable Valkey
+into a miss instead of an error, because the cache is optional (see [caching.md](caching.md#failures)).
+{%- endif %}
+
+## Catching
+
+- Catch the narrowest exception that you can handle. `except Exception` appears only where
+  the process must keep going whatever happens: the readiness checks in `api/health.py` and
+  the catch-all handler in `api/errors.py`.
+- Never catch to log and re-raise. Log once, where the error is handled: for errors that
+  reach HTTP, that is `api/errors.py`, so use cases and adapters that raise do not log.
+- An error that is handled and swallowed (a cache miss on an unavailable cache) is logged
+  where it is swallowed, once, with a dotted event name and `error_type`.

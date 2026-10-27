@@ -13,6 +13,8 @@ _exclude:
   - "{% if not with_database %}tests/infrastructure/db{% endif %}"
   - "{% if not with_cache %}src/{{ package_name }}/infrastructure/cache{% endif %}"
   - "{% if not with_cache %}tests/infrastructure/cache{% endif %}"
+  - "{% if not with_database %}docs/conventions/persistence.md{% endif %}"
+  - "{% if not with_cache %}docs/conventions/caching.md{% endif %}"
 
 _tasks:
   - command: uv lock

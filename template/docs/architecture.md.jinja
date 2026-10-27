@@ -1,0 +1,257 @@
+# Architecture
+
+How `{{ service_name }}` is put together: the layers and what each may import, where objects
+are built, how routes get them, and what happens during a request.
+
+## Layers
+
+```
+src/{{ package_name }}/
+  domain/          entities, value objects, domain errors, ports (typing.Protocol)
+  application/     use cases: orchestrate the domain through ports
+  infrastructure/  adapters that implement ports (HTTP clients{% if with_database %}, PostgreSQL{% endif %}{% if with_cache %}, Valkey{% endif %}, LLM)
+  api/             routers, request/response schemas, dependency providers, error handlers
+  observability/   logging, tracing, metrics
+  settings.py      configuration from environment variables
+  main.py          composition root: create_app() and the lifespan
+```
+
+Inside each layer, code is grouped by feature: `domain/plans/`, `application/plans/`,
+`api/plans.py` (the example below). Every package directory has an `__init__.py`.
+
+| Layer | May import | Must not import |
+|---|---|---|
+| `domain` | the standard library, other `domain` modules | any other layer, `observability`, `settings`, frameworks and clients (`fastapi`, `starlette`, `sqlalchemy`, `httpx2`, `redis`, `pydantic_settings`) |
+| `application` | `domain`, `observability`, `settings` | `infrastructure`, `api`, the frameworks and clients above |
+| `infrastructure` | `domain`, `observability`, `settings`, client libraries | `application`, `api` |
+| `api` | everything above, FastAPI | (nothing imports `api` except `main.py`) |
+
+`make imports` checks this with the import-linter contracts in `pyproject.toml`:
+
+- **Layers:** `api` → `application | infrastructure` → `domain`. `application` and
+  `infrastructure` never import each other; `api` may import `infrastructure`, because the
+  providers in `api/dependencies.py` build adapters.
+- **Framework-free:** `domain` and `application` may not import `fastapi`, `starlette`,
+  `sqlalchemy`, `httpx2`, `redis` or `pydantic_settings` directly.
+- **Pure domain:** `domain` may not import `{{ package_name }}.observability` or
+  `{{ package_name }}.settings`.
+
+The dependency rule behind it: `api → application → domain ← infrastructure`. The domain
+defines what it needs as a port; infrastructure implements it; only the composition root
+knows which adapter implements which port.
+
+## Composition root
+
+`create_app()` in `main.py` is the one place that builds things:
+
+1. `get_settings()` (unless a test passes `Settings`), then `setup_telemetry()` and
+   `configure_logging()`.
+2. `lifespan` opens every resource that has a lifetime inside one `AsyncExitStack`, so they
+   close in reverse order on shutdown, and also when startup fails half-way. Telemetry is
+   registered first, so it shuts down last and flushes everything else.
+3. The open resources go into one `AppState` (`api/dependencies.py`), stored on
+   `app.state.app_state`.
+4. Middleware (`RequestLoggingMiddleware`), the error handlers (`register_error_handlers`),
+   routers and `instrument_app()`.
+
+Resources opened in the lifespan today:
+
+| Resource | Built by | Closed by | `AppState` field |
+|---|---|---|---|
+| shared httpx2 client | `create_http_client()` (`infrastructure/http.py`) | `enter_async_context` | `http_client` |
+{%- if with_database %}
+| SQLAlchemy engine (connection pool) | `create_db_engine()` (`infrastructure/db/engine.py`) | `push_async_callback(db_engine.dispose)` | `db_session_factory` (built by `create_session_factory()`) |
+{%- endif %}
+{%- if with_cache %}
+| redis-py client for Valkey | `create_cache_client()` (`infrastructure/cache/valkey.py`) | `push_async_callback(cache_client.aclose)` | `cache` (a `ValkeyCache`) |
+{%- endif %}
+
+To add one: write a factory in `infrastructure/` that takes its settings slice, open it in
+`lifespan` and register its close on the stack, add a field to `AppState`, and add a
+provider (below). Never create clients, pools or engines per request or at import time.
+
+## How dependencies reach routes
+
+Routes never read `request.app.state` and never build adapters themselves. They declare
+typed dependencies; the providers in `api/dependencies.py` build them from `AppState`:
+
+| Alias | Gives | Provider |
+|---|---|---|
+| `AppStateDep` | `AppState` | `get_app_state` |
+| `SettingsDep` | `Settings` | `get_app_settings` |
+| `HttpClientDep` | the shared `httpx2.AsyncClient` | `get_http_client` |
+{%- if with_database %}
+| `DbSessionDep` | an `AsyncSession` in the request's transaction | `get_db_session` |
+{%- endif %}
+{%- if with_cache %}
+| `CacheDep` | the `ValkeyCache` | `get_cache` |
+{%- endif %}
+
+A use case gets its own provider and alias in `api/dependencies.py`: the provider builds the
+adapters and passes them to the use case; the route only names the alias. A full example
+follows: a use case that returns the days the next meal plan covers, with the date behind
+a `Clock` port so tests can fix it.
+
+The domain: a rule and a port.
+
+```python
+# src/{{ package_name }}/domain/plans/plan.py
+from datetime import date, timedelta
+
+from {{ package_name }}.domain.errors import ValidationError
+
+MIN_PLAN_DAYS = 3
+MAX_PLAN_DAYS = 7
+
+
+class PlanLengthError(ValidationError):
+    def __init__(self, days: int) -> None:
+        super().__init__(f"A plan covers {MIN_PLAN_DAYS} to {MAX_PLAN_DAYS} days, not {days}")
+
+
+def plan_days(first_day: date, days: int) -> list[date]:
+    """The dates a plan of `days` days starting on `first_day` covers."""
+    if not MIN_PLAN_DAYS <= days <= MAX_PLAN_DAYS:
+        raise PlanLengthError(days)
+    return [first_day + timedelta(days=offset) for offset in range(days)]
+```
+
+```python
+# src/{{ package_name }}/domain/plans/ports.py
+from datetime import date
+from typing import Protocol
+
+
+class Clock(Protocol):
+    def today(self) -> date: ...
+```
+
+The use case: depends on the port, not on an adapter, and opens a span.
+
+```python
+# src/{{ package_name }}/application/plans/upcoming_plan_days.py
+from datetime import date, timedelta
+
+from {{ package_name }}.domain.plans.plan import plan_days
+from {{ package_name }}.domain.plans.ports import Clock
+from {{ package_name }}.observability import get_tracer
+
+_tracer = get_tracer(__name__)
+
+
+class UpcomingPlanDays:
+    """The days the next plan covers; it starts tomorrow."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    def __call__(self, days: int) -> list[date]:
+        with _tracer.start_as_current_span("plan.upcoming_days") as span:
+            span.set_attribute("plan.days", days)
+            return plan_days(self._clock.today() + timedelta(days=1), days)
+```
+
+The adapter. It does not inherit from `Clock`: ports are Protocols, and pyright checks that
+`SystemClock` fits where the provider passes it.
+
+```python
+# src/{{ package_name }}/infrastructure/clock.py
+from datetime import UTC, date, datetime
+
+
+class SystemClock:
+    def today(self) -> date:
+        return datetime.now(UTC).date()
+```
+
+The provider and its alias, at the end of `api/dependencies.py` (`Annotated` and `Depends`
+are already imported there). A provider that needs a resource takes it as a parameter,
+like `get_http_client(state: AppStateDep)` does.
+
+```python
+# add to src/{{ package_name }}/api/dependencies.py
+from {{ package_name }}.application.plans.upcoming_plan_days import UpcomingPlanDays
+from {{ package_name }}.infrastructure.clock import SystemClock
+
+
+def get_upcoming_plan_days() -> UpcomingPlanDays:
+    return UpcomingPlanDays(SystemClock())
+
+
+type UpcomingPlanDaysDep = Annotated[UpcomingPlanDays, Depends(get_upcoming_plan_days)]
+```
+
+The router: HTTP in, HTTP out. A day count outside 3–7 raises `PlanLengthError`, which
+`api/errors.py` turns into a 422; the route does not catch it.
+
+```python
+# src/{{ package_name }}/api/plans.py
+from datetime import date
+
+from fastapi import APIRouter
+
+from {{ package_name }}.api.dependencies import UpcomingPlanDaysDep
+from {{ package_name }}.api.schemas import ApiModel
+
+router = APIRouter(prefix="/plans", tags=["plans"])
+
+
+class UpcomingDaysResponse(ApiModel):
+    days: list[date]
+
+
+@router.get("/upcoming-days")
+async def upcoming_days(
+    upcoming_plan_days: UpcomingPlanDaysDep, days: int = 7
+) -> UpcomingDaysResponse:
+    return UpcomingDaysResponse(days=upcoming_plan_days(days))
+```
+
+And the router is included in `create_app()`:
+
+```diff
+--- src/{{ package_name }}/main.py
++++ src/{{ package_name }}/main.py
+@@
+-from {{ package_name }}.api import health
++from {{ package_name }}.api import health, plans
+@@
+     app.include_router(health.router)
++    app.include_router(plans.router)
+```
+
+Its tests are in [conventions/testing.md](conventions/testing.md#example-tests-for-a-use-case).
+Tests swap an adapter with `app.dependency_overrides[get_upcoming_plan_days]`; the same
+works for any provider, including `get_app_state`.
+
+## Readiness
+
+`/health/live` answers as long as the process runs. `/health/ready` runs every check in
+`AppState.readiness_checks` concurrently, each limited to `READINESS_CHECK_TIMEOUT_SECONDS`,
+and answers 503 when one fails or times out.
+{%- if with_database %}
+The database is checked by `ping()` (`SELECT 1`) under the name `database`.
+{%- endif %}
+A new required resource adds its check in `lifespan`. A check is an async function that
+raises when the resource is unavailable (`ReadinessCheck`).
+{%- if with_cache %}
+The cache is not required, so it has no check: while Valkey is down every lookup is a miss
+and the service keeps serving.
+{%- endif %}
+
+## A request, end to end
+
+```
+HTTP request
+  └─ FastAPI instrumentation            server span "GET /plans/upcoming-days"
+      └─ RequestLoggingMiddleware       one http.request log line, inside the span
+          └─ router (api/plans.py)      validates input with ApiModel schemas
+              ├─ providers              build the use case from AppState (api/dependencies.py)
+              └─ use case               span "plan.upcoming_days" (application/)
+                  └─ port → adapter     httpx2{% if with_database %} / SQLAlchemy{% endif %}{% if with_cache %} / redis{% endif %} calls get client spans automatically
+          error? → api/errors.py        domain error → problem details (logged once there)
+```
+
+Spans nest because everything runs inside the server span: one user action is one trace,
+also across services, since the shared httpx2 client propagates the trace context. Log
+lines carry `trace_id` and `span_id`. See the observability rules in `AGENTS.md`.

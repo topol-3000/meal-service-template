@@ -9,8 +9,11 @@ decisions are in the **meal-platform** repo (`AGENTS.md`, `docs/adr/`).
 - `template/`: what a generated service gets. Files ending in `.jinja` are rendered;
   everything else is copied as is (so `${{ }}` in GitHub workflows needs no escaping
   unless the file is `.jinja`).
-- `template/AGENTS.md.jinja` and `template/.claude/skills/`: the agent instructions every
-  service inherits. Changes there change how agents work in all services.
+- `template/AGENTS.md.jinja`, `template/docs/` and `template/.claude/skills/`: the agent
+  instructions every service inherits. Changes there change how agents work in all services.
+  Names, paths and examples in them must exist and pass `make check` in every variant:
+  a code example is a whole file (first line `# <path>`), an addition (`# add to <path>`)
+  or a diff against the rendered service.
 
 ## Working on the template
 

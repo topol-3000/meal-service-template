@@ -1,0 +1,145 @@
+# Python
+
+Python {{ python_version }}, pyright strict, ruff. Whatever these tools check is not repeated
+here; this page covers the choices they leave open.
+
+## Typing
+
+- `X | None` and `X | Y`, never `Optional` / `Union`; built-in generics (`list[str]`,
+  `dict[str, int]`), never `typing.List` / `Dict`. ruff bans the old forms.
+- Abstract types from `collections.abc` (`Sequence`, `Mapping`, `Iterable`, `AsyncIterator`,
+  `Callable`). Parameters take the most general type that works (`Sequence[Recipe]`),
+  return types are concrete (`list[Recipe]`).
+- Generics in PEP 695 syntax: `class Page[T]: ...`, `def first[T](items: Sequence[T]) -> T`.
+  No `TypeVar` declarations.
+- Aliases with the `type` statement: `type RecipeId = UUID`. Use `NewType` when two ids of the
+  same base type must not be mixed up.
+- `typing.Self` for methods returning their own class; `@typing.override` on every method
+  that overrides one of a base class.
+- `Protocol` for ports. `TypedDict` only to describe a dict an untyped library hands you;
+  data you parse is a Pydantic model, data you own is a dataclass.
+- Closed sets of values: `StrEnum`, or `Literal[...]` for a few strings in one place.
+- Annotations are lazy (PEP 649, the default in 3.14): no `from __future__ import annotations`
+  and no string annotations, also for forward references.
+- No `Any` in domain or application signatures: `object` or a Protocol. `cast()` only with a
+  comment saying why it holds.
+- No bare `# type: ignore`. When pyright can't see something (an untyped library), use
+  `# pyright: ignore[<rule>]` with a comment giving the reason.
+
+```python
+from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import NewType, Self, override
+from uuid import UUID
+
+PlanId = NewType("PlanId", UUID)
+
+
+class MealType(StrEnum):
+    BREAKFAST = "breakfast"
+    LUNCH = "lunch"
+    DINNER = "dinner"
+
+
+@dataclass(frozen=True, slots=True)
+class Quantity:
+    amount: float
+    unit: str
+
+    def times(self, factor: float) -> Self:
+        return type(self)(self.amount * factor, self.unit)
+
+    @override
+    def __str__(self) -> str:
+        return f"{self.amount:g} {self.unit}"
+
+
+@dataclass(frozen=True, slots=True)
+class Page[T]:
+    items: Sequence[T]
+    next_cursor: str | None = None
+
+
+def first[T](items: Sequence[T]) -> T | None:
+    return items[0] if items else None
+```
+
+## Classes, functions and SOLID
+
+Each principle as a rule you can check in review:
+
+- **Single responsibility.** One use case per module (`application/<feature>/<verb>_<noun>.py`),
+  one class per use case. A router module only handles HTTP: parse, call the use case, build
+  the response.
+- **Open/closed.** Support a new provider by adding an adapter for the existing port, not
+  by `if provider == ...` branches in the use case.
+- **Liskov.** Every adapter and every fake honours the port's documented behaviour: the
+  errors it raises, ordering, what `None` means. A fake that never raises
+  `RecipeNotFoundError` makes tests pass that production fails.
+- **Interface segregation.** Ports are small and named after the caller's need
+  (`RecipeReader`, `RecipeWriter` in [models.md](models.md#domain-models)), not after the implementation
+  (`RecipeRepositoryInterface`). One adapter may implement several.
+- **Dependency inversion.** `application` depends on `domain` ports, never on
+  `infrastructure`; `make imports` enforces it.
+
+And:
+
+- A use case is a class that takes its ports in `__init__` and has one public method,
+  `__call__`.
+- A function when there is no state; a class only when it holds dependencies or state.
+- Composition over inheritance. At most one level of inheritance outside framework base
+  classes (`Exception`, `BaseModel`{% if with_database %}, `DeclarativeBase`{% endif %}, ...).
+- Dependencies come in through `__init__`. Nothing reaches out for them (no globals, no
+  `get_settings()` outside the composition root).
+- Async all the way for I/O. No blocking calls in async code (`time.sleep`, sync clients,
+  file I/O in a loop); CPU-heavy work goes to `asyncio.to_thread`.
+
+## Anti-patterns
+
+| Don't | Instead |
+|---|---|
+| an abstract base class with one implementation | the concrete class; a Protocol only at a port |
+| a factory for one concrete type | call the constructor |
+| a service locator or global container | pass dependencies to `__init__`; `create_app()` builds them |
+| `utils.py` / `helpers.py` | put the function next to its only user, or in a module named after the concept |
+| mutable module-level state | state on an instance or in `AppState`; module level holds constants, `_logger`, `_tracer` |
+| deep inheritance | composition: hold the other object |
+| `except Exception` around business code | catch what you can handle (see [errors.md](errors.md#catching)) |
+| returning `None` (or `False`) to signal an error | raise a domain error |
+| `**kwargs` passed through to another call | spell the parameters out, so pyright checks them |
+| a boolean parameter that switches behaviour | two functions, or a `StrEnum` (ruff's `FBT` rules) |
+
+Instead of reaching for the current date (or a global client), take it as a dependency:
+
+```python
+from datetime import date, timedelta
+from typing import Protocol
+
+
+class Clock(Protocol):
+    def today(self) -> date: ...
+
+
+class CurrentWeek:
+    """The Monday of the current week."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    def __call__(self) -> date:
+        today = self._clock.today()
+        return today - timedelta(days=today.weekday())
+```
+
+## Naming and files
+
+- A module is named after its main class: `upcoming_plan_days.py` holds `UpcomingPlanDays`.
+- `snake_case` modules, functions and variables; `PascalCase` classes; `UPPER_SNAKE` constants;
+  a leading `_` for what other modules must not use (`_logger`, `_key()`).
+- Every module that logs or traces has `_logger = get_logger(__name__)` /
+  `_tracer = get_tracer(__name__)` at the top.
+- Early returns instead of nesting; small functions with explicit names; no clever
+  metaprogramming.
+- Comments explain why, not what. A docstring when the name and signature don't say enough:
+  the contract, the errors, the units.

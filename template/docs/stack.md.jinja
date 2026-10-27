@@ -1,0 +1,51 @@
+# Stack
+
+The libraries this service uses, and the ones it must not. Versions live in
+`pyproject.toml` (and `uv.lock`) only.
+
+## Approved
+
+| Purpose | Library | Why |
+|---|---|---|
+| HTTP API | FastAPI on uvicorn | async, typed dependencies, OpenAPI for meal-platform `contracts/` |
+| Boundary models | Pydantic v2 | validation and JSON at the edges (see [models.md](conventions/models.md)) |
+| Configuration | pydantic-settings | typed settings from environment variables (see [settings.md](conventions/settings.md)) |
+| Logging | structlog, through `observability` | JSON lines with trace ids, the same records exported to Loki |
+| Outgoing HTTP | httpx2 (`HttpClientDep`) | async, maintained successor of httpx, traced by OpenTelemetry |
+| Telemetry | OpenTelemetry SDK, OTLP exporter, FastAPI and httpx instrumentation | traces, metrics and logs into meal-platform's Grafana |
+{%- if with_database %}
+| Database | SQLAlchemy 2 (async) + asyncpg + Alembic, SQLAlchemy instrumentation | typed async ORM, a native asyncio PostgreSQL driver, migrations (see [persistence.md](conventions/persistence.md)) |
+{%- else %}
+| Database | none here; the template's `with_database` option adds SQLAlchemy 2 (async) + asyncpg + Alembic | ask before adding a database |
+{%- endif %}
+{%- if with_cache %}
+| Cache | Valkey through redis-py (`redis.asyncio`), redis instrumentation | the client with OpenTelemetry support; an optional cache (see [caching.md](conventions/caching.md)) |
+{%- else %}
+| Cache | none here; the template's `with_cache` option adds Valkey through redis-py | ask before adding a cache |
+{%- endif %}
+| Tests | pytest, pytest-asyncio, pytest-cov{% if with_database or with_cache %}, testcontainers{% endif %} | see [testing.md](conventions/testing.md) |
+| Quality | ruff, pyright (strict), import-linter, pre-commit | `make check` |
+| Packaging | uv, uv_build | one lock file, fast installs, the Docker image builds with it |
+
+## Banned
+
+| Don't use | Use instead | Enforced by |
+|---|---|---|
+| `requests`, `aiohttp`, `httpx` | httpx2 through the shared client | ruff (`banned-api`) |
+| `logging.getLogger`, `print` | `get_logger` from `{{ package_name }}.observability` | ruff (`banned-api`, `T20`) |
+| `typing.Optional`, `Union`, `List`, `Dict` | `X \| None`, `X \| Y`, `list`, `dict` | ruff (`banned-api`, `UP`) |
+| Tortoise ORM, other ORMs, sync database drivers | SQLAlchemy 2 async + asyncpg | review |
+| `dependency-injector`, `fastapi-class`, `fastapi-utils` | FastAPI dependencies and the providers in `api/dependencies.py` | review |
+| `valkey` (valkey-py), `valkey-glide` | redis-py: valkey-py has no OpenTelemetry instrumentation, GLIDE's can't join the app's traces | review |
+| Celery, stream consumers, background workers | nothing in the template; services talk over HTTP. Messaging needs its own decision first | review |
+| Poetry, pip, pip-tools | `uv add` / `uv add --dev` | review |
+
+Authentication libraries are not chosen yet; that decision comes with the first service
+that needs it.
+
+## Adding a dependency
+
+A new runtime dependency needs approval first (see "Boundaries for agents" in `AGENTS.md`).
+Then: `uv add <package>` (`uv add --dev` for tools), a lower bound that matches the version
+you tested, and a row in the table above with the reason. If it does I/O, it needs
+OpenTelemetry instrumentation or manual spans.

@@ -1,0 +1,318 @@
+# Caching (Valkey)
+
+The cache is an optimisation, never the source of truth. Anything in it can disappear at
+any moment (expiry, eviction, a restart, an outage), and the service must answer correctly
+without it, only slower.
+
+## What exists
+
+- `CacheSettings` (`CACHE__URL`, `CACHE__DEFAULT_TTL_SECONDS`, `CACHE__CONNECT_TIMEOUT_SECONDS`,
+  `CACHE__TIMEOUT_SECONDS`).
+- `create_cache_client()` (`infrastructure/cache/valkey.py`): one redis-py `Redis` client
+  with its own pool, opened in `lifespan` and closed on shutdown. It connects on the first
+  command, has 0.5 s timeouts by default and never retries: an unavailable cache costs one
+  timeout, then the request goes on.
+- `ValkeyCache`: the only code that uses the client. `get(key) -> bytes | None`,
+  `set(key, value, ttl_seconds=None)` (always sends a TTL), `delete(key)`. Available to
+  providers as `CacheDep`.
+- Valkey commands are traced by the redis instrumentation (`instrument_app`) as client
+  spans named after the command.
+- No readiness check: `/health/ready` does not depend on Valkey.
+
+## Rules
+
+- **Cache-aside only.** Read the cache; on a miss, read the source of truth and write the
+  value back. No write-through, no write-behind, no data that exists only in the cache.
+- **A port per need.** A feature declares what it needs in `domain/<feature>/ports.py`
+  (`RecipeCache`), and an adapter in `infrastructure/cache/<feature>.py` implements it by
+  wrapping `ValkeyCache`. Use cases see the port only: never redis-py types, `ValkeyCache`
+  or `CacheDep`.
+- **Keys:** `<service>:<feature>:<version>:<id>`, e.g. `{{ service_name }}:recipes:v1:<recipe id>`.
+  Bump `<version>` when the cached shape changes; old entries are then never read and
+  expire on their own. No migration of cached data.
+- **Every write has a TTL**: `CACHE__DEFAULT_TTL_SECONDS` (300 s), or `ttl_seconds=` when the
+  feature needs another. See [Staleness](#staleness) for how to pick it.
+- **Values are Pydantic models as JSON** (`model_dump_json()` / `model_validate_json()`),
+  defined in the adapter. A value that does not parse is a miss.
+- **No secrets or personal data in keys.** Use ids, not e-mail addresses or names. The redis
+  instrumentation records commands without their arguments (spans show `GET ?`), so keys
+  stay out of traces. But keys show up wherever someone logs them, and in Valkey's own
+  tooling: `MONITOR` streams every command with its arguments, `SLOWLOG` keeps slow ones,
+  `SCAN` lists them. `ValkeyCache` never logs a key; keep it that way in adapters.
+
+## Failures
+
+When Valkey is down, unreachable or slower than `CACHE__TIMEOUT_SECONDS`, or refuses writes
+(a read-only replica after a failover, or out of memory), `ValkeyCache` turns the call into
+a miss (`get`) or skips it (`set`, `delete`). Each such call logs one warning,
+`cache.unavailable`, with `operation` and `error_type` (no key). The request still succeeds.
+
+Any other error (a key holding another type, an invalid TTL) is a bug and propagates.
+
+## Staleness
+
+Invalidate by deleting the key after the source of truth changes (`forget()` in the
+example below). That is not enough on its own:
+
+- **A failed delete leaves the old value until it expires.** While Valkey is unavailable,
+  `delete` is skipped (and logged); the old value is served again once Valkey is back,
+  until its TTL runs out.
+- **A concurrent reader can cache the old value again**, if it read the source of truth just
+  before the change and writes to the cache just after the delete.
+{%- if with_database %}
+  Within a request the database commit happens after the route returns
+  (`DbSessionDep`), so a delete made by the use case comes before the commit, which widens
+  that window.
+{%- endif %}
+
+So the TTL is the bound on how stale a value can be. Choose it per feature from "how long
+may a user see the old value", not from hit ratio alone.
+
+## Hit ratio
+
+Every `ValkeyCache.get` adds 1 to the `cache.lookups` counter with `result` = `hit`, `miss`
+or `unavailable`. In Prometheus, where OTLP names get underscores and counters a `_total`
+suffix, it is `cache_lookups_total`:
+
+```
+sum(rate(cache_lookups_total{service_name="{{ service_name }}", result="hit"}[5m]))
+  / sum(rate(cache_lookups_total{service_name="{{ service_name }}"}[5m]))
+```
+
+`unavailable` is counted apart, so an outage does not look like cold keys. The counter is
+for all features together; a value the feature adapter can't parse counts as a `hit` there.
+
+## Example: caching recipe lookups
+
+This builds on the `Recipe` entity and the `RecipeReader` port in [models.md](models.md).
+The port, next to `RecipeReader`:
+
+```python
+# add to src/{{ package_name }}/domain/recipes/ports.py
+class RecipeCache(Protocol):
+    """Recipes kept for a while. Not the source of truth: `get` may miss at any time."""
+
+    async def get(self, recipe_id: RecipeId) -> Recipe | None: ...
+
+    async def put(self, recipe: Recipe) -> None: ...
+
+    async def forget(self, recipe_id: RecipeId) -> None: ...
+```
+
+The adapter: keys, value model, (de)serialisation.
+
+```python
+# src/{{ package_name }}/infrastructure/cache/recipes.py
+from uuid import UUID
+
+import pydantic
+
+from {{ package_name }}.domain.recipes.recipe import Recipe, RecipeId
+from {{ package_name }}.infrastructure.cache.valkey import ValkeyCache
+from {{ package_name }}.observability import get_logger
+
+_logger = get_logger(__name__)
+
+# Bump the version when `CachedRecipe` changes: old entries are then never read.
+_KEY_PREFIX = "{{ service_name }}:recipes:v1"
+
+
+class CachedRecipe(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(frozen=True)
+
+    id: UUID
+    title: str
+    servings: int
+
+
+class ValkeyRecipeCache:
+    """`RecipeCache` on `ValkeyCache`."""
+
+    def __init__(self, cache: ValkeyCache) -> None:
+        self._cache = cache
+
+    async def get(self, recipe_id: RecipeId) -> Recipe | None:
+        value = await self._cache.get(_key(recipe_id))
+        if value is None:
+            return None
+        try:
+            cached = CachedRecipe.model_validate_json(value)
+        except pydantic.ValidationError:
+            # A shape change without a version bump, most likely. A miss, but worth a look.
+            _logger.warning("cache.invalid_value", key_prefix=_KEY_PREFIX)
+            return None
+        return Recipe(id=cached.id, title=cached.title, servings=cached.servings)
+
+    async def put(self, recipe: Recipe) -> None:
+        cached = CachedRecipe(id=recipe.id, title=recipe.title, servings=recipe.servings)
+        await self._cache.set(_key(recipe.id), cached.model_dump_json().encode())
+
+    async def forget(self, recipe_id: RecipeId) -> None:
+        await self._cache.delete(_key(recipe_id))
+
+
+def _key(recipe_id: RecipeId) -> str:
+    return f"{_KEY_PREFIX}:{recipe_id}"
+```
+
+The use case does the cache-aside, through the two ports:
+
+```python
+# src/{{ package_name }}/application/recipes/find_recipe.py
+from {{ package_name }}.domain.recipes.ports import RecipeCache, RecipeReader
+from {{ package_name }}.domain.recipes.recipe import Recipe, RecipeId
+from {{ package_name }}.observability import get_tracer
+
+_tracer = get_tracer(__name__)
+
+
+class FindRecipe:
+    def __init__(self, recipes: RecipeReader, cache: RecipeCache) -> None:
+        self._recipes = recipes
+        self._cache = cache
+
+    async def __call__(self, recipe_id: RecipeId) -> Recipe:
+        with _tracer.start_as_current_span("recipe.find") as span:
+            span.set_attribute("recipe.id", str(recipe_id))
+            recipe = await self._cache.get(recipe_id)
+            span.set_attribute("cache.hit", recipe is not None)
+            if recipe is None:
+                recipe = await self._recipes.get(recipe_id)
+                await self._cache.put(recipe)
+            return recipe
+```
+
+Its provider in `api/dependencies.py` takes `cache: CacheDep` and passes
+`ValkeyRecipeCache(cache)`, next to the `RecipeReader` adapter{% if with_database %} (the repository from
+[persistence.md](persistence.md#example-a-recipes-table)){% endif %}.
+
+Unit tests use in-memory fakes for both ports; only the adapter is tested against Valkey
+(see [testing.md](testing.md#fakes-over-mocks)):
+
+```python
+# tests/fakes/recipes.py
+from {{ package_name }}.domain.recipes.recipe import Recipe, RecipeId, RecipeNotFoundError
+
+
+class FakeRecipeReader:
+    """`RecipeReader` over a dict. `reads` counts the calls."""
+
+    def __init__(self, *recipes: Recipe) -> None:
+        self.recipes = {recipe.id: recipe for recipe in recipes}
+        self.reads = 0
+
+    async def get(self, recipe_id: RecipeId) -> Recipe:
+        self.reads += 1
+        if recipe_id not in self.recipes:
+            raise RecipeNotFoundError(recipe_id)
+        return self.recipes[recipe_id]
+
+
+class FakeRecipeCache:
+    """`RecipeCache` over a dict."""
+
+    def __init__(self, *recipes: Recipe) -> None:
+        self.recipes = {recipe.id: recipe for recipe in recipes}
+
+    async def get(self, recipe_id: RecipeId) -> Recipe | None:
+        return self.recipes.get(recipe_id)
+
+    async def put(self, recipe: Recipe) -> None:
+        self.recipes[recipe.id] = recipe
+
+    async def forget(self, recipe_id: RecipeId) -> None:
+        self.recipes.pop(recipe_id, None)
+```
+
+```python
+# tests/application/recipes/test_find_recipe.py
+from uuid import uuid4
+
+import pytest
+
+from {{ package_name }}.application.recipes.find_recipe import FindRecipe
+from {{ package_name }}.domain.recipes.recipe import Recipe, RecipeNotFoundError
+from tests.fakes.recipes import FakeRecipeCache, FakeRecipeReader
+
+_SOUP = Recipe(id=uuid4(), title="Lentil soup", servings=4)
+
+
+async def test_a_miss_reads_the_source_and_fills_the_cache() -> None:
+    reader, cache = FakeRecipeReader(_SOUP), FakeRecipeCache()
+
+    assert await FindRecipe(reader, cache)(_SOUP.id) == _SOUP
+
+    assert cache.recipes == {_SOUP.id: _SOUP}
+
+
+async def test_a_hit_does_not_read_the_source() -> None:
+    reader, cache = FakeRecipeReader(_SOUP), FakeRecipeCache(_SOUP)
+
+    assert await FindRecipe(reader, cache)(_SOUP.id) == _SOUP
+
+    assert reader.reads == 0
+
+
+async def test_a_missing_recipe_is_not_cached() -> None:
+    cache = FakeRecipeCache()
+
+    with pytest.raises(RecipeNotFoundError):
+        await FindRecipe(FakeRecipeReader(), cache)(_SOUP.id)
+
+    assert cache.recipes == {}
+```
+
+```python
+# tests/infrastructure/cache/test_recipes.py
+from collections.abc import AsyncIterator
+from uuid import uuid4
+
+import pytest
+from redis.asyncio import Redis
+
+from {{ package_name }}.domain.recipes.recipe import Recipe
+from {{ package_name }}.infrastructure.cache.recipes import ValkeyRecipeCache
+from {{ package_name }}.infrastructure.cache.valkey import ValkeyCache, create_cache_client
+from {{ package_name }}.settings import Settings
+
+pytestmark = pytest.mark.integration
+
+_SOUP = Recipe(id=uuid4(), title="Lentil soup", servings=4)
+
+
+@pytest.fixture
+async def recipe_cache(cache_settings: Settings) -> AsyncIterator[ValkeyRecipeCache]:
+    client = create_cache_client(cache_settings.cache)
+    yield ValkeyRecipeCache(ValkeyCache(client, default_ttl_seconds=60))
+    await client.aclose()
+
+
+async def test_a_stored_recipe_is_read_back(recipe_cache: ValkeyRecipeCache) -> None:
+    await recipe_cache.put(_SOUP)
+
+    assert await recipe_cache.get(_SOUP.id) == _SOUP
+
+
+async def test_a_forgotten_recipe_is_a_miss(recipe_cache: ValkeyRecipeCache) -> None:
+    await recipe_cache.put(_SOUP)
+
+    await recipe_cache.forget(_SOUP.id)
+
+    assert await recipe_cache.get(_SOUP.id) is None
+
+
+async def test_the_key_names_service_feature_version_and_id(
+    recipe_cache: ValkeyRecipeCache, cache_client: Redis
+) -> None:
+    await recipe_cache.put(_SOUP)
+
+    assert await cache_client.ttl(f"{{ service_name }}:recipes:v1:{_SOUP.id}") > 0
+
+
+async def test_an_unreadable_value_is_a_miss(
+    recipe_cache: ValkeyRecipeCache, cache_client: Redis
+) -> None:
+    await cache_client.set(f"{{ service_name }}:recipes:v1:{_SOUP.id}", b'{"title": 1}')
+
+    assert await recipe_cache.get(_SOUP.id) is None
+```

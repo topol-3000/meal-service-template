@@ -1,0 +1,414 @@
+# Persistence (PostgreSQL)
+
+SQLAlchemy 2 (async) on asyncpg, migrations with Alembic. The service owns its database;
+it never reads another service's tables.
+
+## Engine, sessions, transactions
+
+- `create_db_engine()` (`infrastructure/db/engine.py`) builds the one connection pool, from
+  `DatabaseSettings` (`DB__URL`, `DB__POOL_SIZE`, `DB__MAX_OVERFLOW`). `lifespan` opens it
+  and disposes it on shutdown. `pool_pre_ping` replaces connections the server closed.
+- `create_session_factory()` builds the `async_sessionmaker` stored in
+  `AppState.db_session_factory`, with `expire_on_commit=False`: objects stay readable
+  after the commit, because an expired attribute can't lazy-load in async code.
+- **One request = one session = one transaction.** `DbSessionDep` (`get_db_session` in
+  `api/dependencies.py`) opens a session and a transaction for the request, commits when
+  the route returns and rolls back when it raises. Its `scope="function"` makes the commit
+  happen before the response is sent, so a failed commit is an error response, not a 200
+  for data that was never stored.
+- Repositories and use cases never call `commit()` or `rollback()`. A use case that needs
+  several writes gets them all in the request's transaction. (There is no Unit of Work;
+  revisit when a use case needs a transaction boundary of its own.)
+- Queries are traced by the SQLAlchemy instrumentation (`instrument_app`): every statement
+  is a client span inside the request span, with the statement text (`db.query.text`), not
+  the bound values.
+
+## Models
+
+- Every table class subclasses `Base` (`infrastructure/db/models.py`) and is defined in
+  that module, or imported into it: `migrations/env.py` reads `Base.metadata` from there,
+  and a model it can't see gets no migration.
+- Typed style only: `Mapped[...]` and `mapped_column()`. Nullability comes from the type
+  (`Mapped[str | None]` is nullable).
+- Constraint and index names come from `NAMING_CONVENTION` (`pk_recipes`,
+  `ix_recipes_title`, ...). Don't name them by hand.
+- Relationships use `lazy="raise"`, and queries load what they need explicitly with
+  `selectinload()`. Lazy loading does I/O on attribute access, which fails in async code
+  and hides N+1 queries.
+
+## Queries
+
+- `select()` with `session.execute()` / `session.scalars()`, or `session.get()` for a
+  primary key. Never the legacy `Query` API (`session.query`).
+- Never build SQL from strings. Values are always bound parameters; `text()` only for
+  statements the ORM can't express, with `:name` parameters.
+
+## Repositories
+
+A repository implements one or more domain ports, takes the request's `AsyncSession`, maps
+rows to domain objects and back, and converts database errors into domain errors (see
+[errors.md](errors.md)). One module per aggregate in `infrastructure/db/`. ORM rows never
+leave it.
+
+## Example: a recipes table
+
+This builds on the `Recipe` entity, its errors, the `RecipeReader` / `RecipeWriter` ports
+and the API schemas in [models.md](models.md).
+
+The table. Its index came later, in its own migration (see
+[Long-running operations](#long-running-operations)):
+
+```python
+# add to src/{{ package_name }}/infrastructure/db/models.py
+from uuid import UUID
+
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
+
+
+class RecipeRow(Base):
+    __tablename__ = "recipes"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), index=True)
+    servings: Mapped[int]
+```
+
+The repository. `add()` flushes, so a duplicate key fails inside the repository, where it
+can become a domain error, instead of at the commit after the route returned:
+
+```python
+# src/{{ package_name }}/infrastructure/db/recipes.py
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from {{ package_name }}.domain.recipes.recipe import (
+    Recipe,
+    RecipeAlreadyExistsError,
+    RecipeId,
+    RecipeNotFoundError,
+)
+from {{ package_name }}.infrastructure.db.models import RecipeRow
+
+
+class SqlRecipeRepository:
+    """`RecipeReader` and `RecipeWriter` on PostgreSQL. Never commits (see `DbSessionDep`)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get(self, recipe_id: RecipeId) -> Recipe:
+        row = await self._session.get(RecipeRow, recipe_id)
+        if row is None:
+            raise RecipeNotFoundError(recipe_id)
+        return Recipe(id=row.id, title=row.title, servings=row.servings)
+
+    async def add(self, recipe: Recipe) -> None:
+        self._session.add(RecipeRow(id=recipe.id, title=recipe.title, servings=recipe.servings))
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:  # the primary key is the only constraint
+            raise RecipeAlreadyExistsError(recipe.id) from exc
+```
+
+The use case, its provider and the route:
+
+```python
+# src/{{ package_name }}/application/recipes/add_recipe.py
+from {{ package_name }}.domain.recipes.ports import RecipeWriter
+from {{ package_name }}.domain.recipes.recipe import Recipe
+from {{ package_name }}.observability import get_logger, get_tracer
+
+_tracer = get_tracer(__name__)
+_logger = get_logger(__name__)
+
+
+class AddRecipe:
+    def __init__(self, recipes: RecipeWriter) -> None:
+        self._recipes = recipes
+
+    async def __call__(self, recipe: Recipe) -> None:
+        with _tracer.start_as_current_span("recipe.add") as span:
+            span.set_attribute("recipe.id", str(recipe.id))
+            await self._recipes.add(recipe)
+            _logger.info("recipe.added", recipe_id=str(recipe.id))
+```
+
+```python
+# add to src/{{ package_name }}/api/dependencies.py
+from {{ package_name }}.application.recipes.add_recipe import AddRecipe
+from {{ package_name }}.infrastructure.db.recipes import SqlRecipeRepository
+
+
+def get_add_recipe(session: DbSessionDep) -> AddRecipe:
+    return AddRecipe(SqlRecipeRepository(session))
+
+
+type AddRecipeDep = Annotated[AddRecipe, Depends(get_add_recipe)]
+```
+
+```python
+# add to src/{{ package_name }}/api/recipes.py
+from http import HTTPStatus
+from uuid import uuid4
+
+from fastapi import APIRouter
+
+from {{ package_name }}.api.dependencies import AddRecipeDep
+
+router = APIRouter(prefix="/recipes", tags=["recipes"])
+
+
+@router.post("", status_code=HTTPStatus.CREATED)
+async def add_recipe(request: CreateRecipeRequest, add: AddRecipeDep) -> RecipeResponse:
+    recipe = request.to_domain(uuid4())
+    await add(recipe)
+    return RecipeResponse.from_domain(recipe)
+```
+
+```diff
+--- src/{{ package_name }}/main.py
++++ src/{{ package_name }}/main.py
+@@
+-from {{ package_name }}.api import health
++from {{ package_name }}.api import health, recipes
+@@
+     app.include_router(health.router)
++    app.include_router(recipes.router)
+```
+
+The migration, as `make migration name="add recipes"` wrote it (only the "auto generated"
+comments removed after review):
+
+```python
+# src/{{ package_name }}/infrastructure/db/migrations/versions/2026_10_27_1000_39c6eaac6a35_add_recipes.py
+"""add recipes
+
+Revision ID: 39c6eaac6a35
+Revises:
+Create Date: 2026-10-27 10:00:07.587216
+"""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+# Revision identifiers, used by Alembic.
+revision: str = "39c6eaac6a35"
+down_revision: str | Sequence[str] | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "recipes",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("title", sa.String(length=200), nullable=False),
+        sa.Column("servings", sa.Integer(), nullable=False),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_recipes")),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("recipes")
+```
+
+Tests against the real database (see [testing.md](testing.md#integration-tests)). Each
+session commits like a request does; the commit only releases a savepoint of the test's
+transaction, which is rolled back afterwards:
+
+```python
+# tests/infrastructure/db/test_recipes.py
+from uuid import uuid4
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from {{ package_name }}.domain.recipes.recipe import (
+    Recipe,
+    RecipeAlreadyExistsError,
+    RecipeNotFoundError,
+)
+from {{ package_name }}.infrastructure.db.recipes import SqlRecipeRepository
+
+pytestmark = pytest.mark.integration
+
+type SessionFactory = async_sessionmaker[AsyncSession]
+
+
+async def _add(sessions: SessionFactory, recipe: Recipe) -> None:
+    async with sessions() as session, session.begin():
+        await SqlRecipeRepository(session).add(recipe)
+
+
+async def test_an_added_recipe_is_read_back(db_session_factory: SessionFactory) -> None:
+    recipe = Recipe(id=uuid4(), title="Lentil soup", servings=4)
+    await _add(db_session_factory, recipe)
+
+    async with db_session_factory() as session:
+        assert await SqlRecipeRepository(session).get(recipe.id) == recipe
+
+
+async def test_a_missing_recipe_is_not_found(db_session: AsyncSession) -> None:
+    with pytest.raises(RecipeNotFoundError):
+        await SqlRecipeRepository(db_session).get(uuid4())
+
+
+async def test_adding_an_existing_id_is_a_conflict(db_session_factory: SessionFactory) -> None:
+    recipe = Recipe(id=uuid4(), title="Lentil soup", servings=4)
+    await _add(db_session_factory, recipe)
+
+    with pytest.raises(RecipeAlreadyExistsError):
+        await _add(db_session_factory, recipe)
+```
+
+The route, through HTTP. `db_client` serves the app in the test's event loop; overriding
+`get_app_state` makes requests use the test's connection, so their writes are rolled back
+as well:
+
+```python
+# tests/api/test_recipes.py
+from dataclasses import replace
+from uuid import UUID
+
+import httpx2
+import pytest
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from {{ package_name }}.api.dependencies import get_app_state
+from {{ package_name }}.infrastructure.db.recipes import SqlRecipeRepository
+
+pytestmark = pytest.mark.integration
+
+type SessionFactory = async_sessionmaker[AsyncSession]
+
+
+@pytest.fixture
+def db_app(db_app: FastAPI, db_session_factory: SessionFactory) -> FastAPI:
+    db_app.dependency_overrides[get_app_state] = lambda: replace(
+        db_app.state.app_state, db_session_factory=db_session_factory
+    )
+    return db_app
+
+
+async def test_post_stores_the_recipe(
+    db_client: httpx2.AsyncClient, db_session_factory: SessionFactory
+) -> None:
+    response = await db_client.post("/recipes", json={"title": " Lentil soup ", "servings": 4})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["title"] == "Lentil soup"
+    async with db_session_factory() as session:
+        stored = await SqlRecipeRepository(session).get(UUID(body["id"]))
+    assert (stored.title, stored.servings) == ("Lentil soup", 4)
+
+
+@pytest.mark.parametrize("servings", [0, 51])
+async def test_post_rejects_servings_out_of_range(
+    db_client: httpx2.AsyncClient, servings: int
+) -> None:
+    response = await db_client.post("/recipes", json={"title": "Soup", "servings": servings})
+
+    assert response.status_code == 422
+    assert [error["loc"] for error in response.json()["errors"]] == [["body", "servings"]]
+```
+
+## Writing a migration
+
+1. Change the models in `infrastructure/db/models.py`.
+2. `make migration name="add recipes"` compares the models with the database at `DB__URL`
+   (in `.env`) and writes `migrations/versions/<date>_<revision>_<name>.py`, formatted
+   by ruff. That database must be migrated to head: `make migrate` first.
+3. Review the file. Autogenerate does not see renames (it writes a drop and an add, which
+   loses data), does not compare server defaults, and never writes data migrations. Fix what it got wrong, delete the "auto generated" comments,
+   and write `downgrade()` too.
+4. Data changes go in the migration as SQL (`op.execute()` with bound parameters, or
+   `sa.table()` constructs), never through the ORM models: the models describe the latest
+   schema, the migration runs against an older one.
+5. `make check`. `test_models_match_migrations` fails when a model change has no
+   migration; `test_migrations_downgrade_and_upgrade_again` runs every `downgrade()`.
+6. One migration per change. Once a migration is merged, it is never edited: write a new
+   one.
+
+## Running migrations
+
+- Deploys run `python -m {{ package_name }} migrate` as a one-off job from the service image,
+  before the new version starts (`make migrate` does the same locally). It applies all
+  pending migrations in one transaction, under a PostgreSQL advisory lock
+  (`pg_advisory_xact_lock` with `LOCK_KEY` from `infrastructure/db/migrate.py`), so a second
+  run waits instead of racing. The job needs the service's whole environment, not only
+  `DB__URL`, because it loads the same `Settings`.
+- The migrations ship inside the package (`infrastructure/db/migrations/`), so the image
+  that runs them is the image that needs them.
+
+## Expand, then contract
+
+The job runs while the previous release is still serving, and a release can be rolled
+back. So every migration must work with both the old code and the new:
+
+| Change | Release N (expand) | Release N+1 (contract) |
+|---|---|---|
+| new nullable column, new table | add it | — |
+| new `NOT NULL` column | add it nullable or with a server default; code writes it; backfill | set `NOT NULL` |
+| rename a column | add the new column; code writes both and reads the new one; backfill | drop the old column |
+| drop a column or table | code stops using it | drop it |
+| change a column's type | add a new column, as for a rename | drop the old column |
+
+Never drop, rename or tighten something in the same release that stops using it.
+
+## Long-running operations
+
+Everything runs in one transaction, and some PostgreSQL operations can't run inside one:
+`CREATE INDEX CONCURRENTLY` (an index on a big table without blocking its writes),
+`DROP INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY`. Run them in an autocommit block:
+
+```python
+# src/{{ package_name }}/infrastructure/db/migrations/versions/2026_10_27_1100_8d1e4b7a2c90_index_recipes_title.py
+"""index recipes title
+
+Revision ID: 8d1e4b7a2c90
+Revises: 39c6eaac6a35
+Create Date: 2026-10-27 11:00:00.000000
+"""
+
+from collections.abc import Sequence
+
+from alembic import op
+
+# Revision identifiers, used by Alembic.
+revision: str = "8d1e4b7a2c90"
+down_revision: str | Sequence[str] | None = "39c6eaac6a35"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    # Alone in its revision: the block commits everything migrated so far (see below).
+    with op.get_context().autocommit_block():
+        op.create_index(
+            op.f("ix_recipes_title"), "recipes", ["title"], postgresql_concurrently=True
+        )
+
+
+def downgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.drop_index(op.f("ix_recipes_title"), "recipes", postgresql_concurrently=True)
+```
+
+What the block does to the run:
+
+- It **commits** the migration transaction: every revision applied so far in this run is
+  final, and so is anything this revision did before the block. This revision is recorded
+  in `alembic_version` only after `upgrade()` returns, so if the run fails after the block,
+  the next run starts this revision again. Keep an autocommit operation alone in its own
+  revision.
+- The commit **releases the advisory lock**, and it is not taken again: the rest of the
+  run is not serialised. A second migrate job started meanwhile can apply the same
+  revisions at the same time. Don't start a second job while one is running.
+- A failed `CREATE INDEX CONCURRENTLY` leaves an `INVALID` index behind. Drop it
+  (`DROP INDEX CONCURRENTLY ix_recipes_title`) before the next run, or that run fails on
+  "already exists".
