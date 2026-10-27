@@ -7,10 +7,15 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import OutOfMemoryError, ReadOnlyError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from {{ package_name }}.observability import get_logger
+from {{ package_name }}.observability import get_logger, get_meter
 from {{ package_name }}.settings import CacheSettings
 
 _logger = get_logger(__name__)
+# Hit ratio = hit / (hit + miss + unavailable). `unavailable` is counted apart, so an outage
+# does not look like cold keys.
+_lookups = get_meter(__name__).create_counter(
+    "cache.lookups", unit="{lookup}", description="ValkeyCache.get calls by result"
+)
 
 # Valkey is down, unreachable or too slow (connection errors include a wrong password and a
 # full pool), or it refuses writes: a replica after a failover, or out of memory. Any other
@@ -44,7 +49,8 @@ class ValkeyCache:
 
     The cache is never the source of truth: when Valkey is down, unreachable, slow or refuses
     writes, a read is a miss and a write or delete is skipped, logged once per call as
-    `cache.unavailable` with the `error_type`.
+    `cache.unavailable` with the `error_type`. Every `get` adds 1 to the `cache.lookups`
+    counter with `result` = `hit`, `miss` or `unavailable`.
     """
 
     def __init__(self, client: Redis, *, default_ttl_seconds: int) -> None:
@@ -56,7 +62,9 @@ class ValkeyCache:
             value = await self._client.get(key)
         except _UNAVAILABLE as exc:
             _log_unavailable("get", exc)
+            _lookups.add(1, {"result": "unavailable"})
             return None
+        _lookups.add(1, {"result": "miss" if value is None else "hit"})
         # The client is built without `decode_responses`, so values come back as bytes.
         return cast("bytes | None", value)
 

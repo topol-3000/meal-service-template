@@ -319,9 +319,13 @@ Infrastructure only, no business logic. Each file comes with a test.
       the Valkey-down tests (miss + `cache.unavailable` per call, requests via `CacheDep`,
       `/health/ready` without a cache check, a silent server = miss within the timeout) need no
       Docker. The lifespan test checks Valkey's `CLIENT LIST` for the app's connection.
-- [ ] **3.16** (`with_cache`) `cache.lookups` counter in `ValkeyCache.get` (`get_meter`), attribute
+- [x] **3.16** (`with_cache`) `cache.lookups` counter in `ValkeyCache.get` (`get_meter`), attribute
       `result` = `hit` | `miss` | `unavailable`, for the hit ratio (1.7a). Tests read it through
       an in-memory metric reader.
+      `metric_reader` fixture (every variant): an `InMemoryMetricReader` on the global meter
+      provider with delta temporality, so a read returns what was recorded since the previous one.
+      An empty stored value is a hit. A test in every variant asserts `http.server.request.duration`
+      with its stable attributes, so the fixture is used everywhere.
 
 ## Phase 4: Port useful parts of the boilerplate
 
