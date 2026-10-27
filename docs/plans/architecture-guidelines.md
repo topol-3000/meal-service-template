@@ -70,7 +70,7 @@ docs/
 .claude/skills/                 task recipes (see Phase 5)
 ```
 
-- [ ] **1.1 Slim down `AGENTS.md.jinja`.** Keep the project blurb, commands table, layering
+- [x] **1.1 Slim down `AGENTS.md.jinja`.** Keep the project blurb, commands table, layering
       diagram with the dependency rule, observability hard rules, boundaries for agents.
       Replace the long sections with one-line rules + links to `docs/`.
       Add a "Where does new code go?" table:
@@ -85,19 +85,27 @@ docs/
       | a DB table | `infrastructure/db/models.py` + Alembic migration |
       | cache a slow lookup | port in `domain/`, adapter in `infrastructure/cache/` (`with_cache`) |
 
-- [ ] **1.2 `docs/architecture.md`.**
-  - [ ] Layers and what each may import (mirrors the import-linter contracts in 2.1).
-  - [ ] Composition root: `create_app()` builds settings, adapters and use cases; resources
+      Done: 131 lines without options, 150 with both. Ports go in `domain/<feature>/ports.py`;
+      rows added for a resource with a lifetime, a repository and shared fakes (`tests/fakes/`,
+      now a package in the template). The test rules say why DB tests use `db_client`, and errors
+      point to the handlers in `api/errors.py`. Detail moved to `docs/`, linked at the end.
+
+- [x] **1.2 `docs/architecture.md`.**
+  - [x] Layers and what each may import (mirrors the import-linter contracts in 2.1).
+  - [x] Composition root: `create_app()` builds settings, adapters and use cases; resources
         with a lifetime (DB engine, httpx2 client, cache client) are opened in `lifespan` via `AsyncExitStack`
         and closed in reverse order. This replaces the boilerplate's `on_start/after_start/on_stop`.
-  - [ ] How dependencies reach routes: typed state object on `app.state`, providers in
+  - [x] How dependencies reach routes: typed state object on `app.state`, providers in
         `api/dependencies.py`, aliases like `type PlanService = Annotated[GeneratePlan, Depends(get_generate_plan)]`.
-  - [ ] Readiness: `/health/ready` checks every required resource (DB ping etc.). The cache
+  - [x] Readiness: `/health/ready` checks every required resource (DB ping etc.). The cache
         is not required, so it has no readiness check (D10).
-  - [ ] Request flow diagram: router → use case → port → adapter, with where spans/logs happen.
+  - [x] Request flow diagram: router → use case → port → adapter, with where spans/logs happen.
+  - Its example is a `plans` feature behind a `Clock` port (domain rule, port, use case,
+    adapter, provider, router, `include_router`), because it needs no database, cache or
+    setting and so works in every variant. Use case = class with ports in `__init__` and `__call__`.
 
-- [ ] **1.3 `docs/conventions/python.md`.**
-  - [ ] Typing style for Python 3.14:
+- [x] **1.3 `docs/conventions/python.md`.**
+  - [x] Typing style for Python 3.14:
     - `X | None`, never `Optional`/`Union`; built-in generics (`list[str]`, `dict[str, int]`)
     - PEP 695 generics: `class Repository[T]: ...`, `def first[T](xs: Sequence[T]) -> T`
     - `type` alias statement: `type RecipeId = UUID` or `NewType` when distinct identity matters
@@ -108,7 +116,7 @@ docs/
     - Lazy annotations (PEP 649) are the default in 3.14: no `from __future__ import annotations`,
       no string annotations for forward refs
     - No `Any` in domain/application signatures; `object` or a Protocol instead
-  - [ ] OOP/SOLID as checkable rules:
+  - [x] OOP/SOLID as checkable rules:
     - **SRP:** one use case per module or class; a router module only handles HTTP.
     - **OCP:** extend by adding an adapter for an existing port, not by `if provider == ...` branches.
     - **LSP:** fakes and adapters must honour the port's documented behaviour (errors raised, ordering).
@@ -116,100 +124,117 @@ docs/
     - **DIP:** application depends on domain ports, never on `infrastructure` modules.
     - Composition over inheritance; at most one level of inheritance outside framework base classes.
     - Functions are fine when there is no state; a class only when it holds dependencies or state.
-  - [ ] Anti-patterns list (with short "instead" examples): abstract base class with one
+  - [x] Anti-patterns list (with short "instead" examples): abstract base class with one
         implementation, factory for one concrete type, service locator / global container,
         `utils.py` / `helpers.py` grab-bags, mutable module-level state, deep inheritance,
         catching `Exception` broadly, returning `None` to signal errors, `**kwargs` pass-through.
-  - [ ] Naming and files: file named after primary class (`generate_plan.py` → `GeneratePlan`),
+  - [x] Naming and files: file named after primary class (`generate_plan.py` → `GeneratePlan`),
         constants `UPPER_SNAKE`, early returns over nesting.
 
-- [ ] **1.4 `docs/conventions/models.md`.**
-  - [ ] Three kinds: API schemas (Pydantic, `api/`), domain entities (frozen dataclasses,
+- [x] **1.4 `docs/conventions/models.md`.**
+  - [x] Three kinds: API schemas (Pydantic, `api/`), domain entities (frozen dataclasses,
         `domain/`), persistence models (SQLAlchemy, `infrastructure/db/`). LLM-output schemas
         are Pydantic boundary models too; so are cached values (serialised with `model_dump_json`).
-  - [ ] Base classes: `ApiModel(BaseModel)` with `ConfigDict(extra="forbid", frozen=True)`
+  - [x] Base classes: `ApiModel(BaseModel)` with `ConfigDict(extra="forbid", frozen=True)`
         (the idea behind the boilerplate's `_ExtraBaseModel`, in v2 syntax). Separate request and response models.
-  - [ ] Field rules: `Annotated[str, Field(min_length=1, max_length=200)]`, reusable
+  - [x] Field rules: `Annotated[str, Field(min_length=1, max_length=200)]`, reusable
         constrained aliases in one place, `X | None = None` explicitly.
-  - [ ] Mapping lives in exactly one place per boundary: `to_domain()` / `from_domain()` on
+  - [x] Mapping lives in exactly one place per boundary: `to_domain()` / `from_domain()` on
         the API schema; the repository maps ORM ↔ domain. Domain objects never leave via HTTP directly.
 
-- [ ] **1.5 `docs/conventions/settings.md`.**
-  - [ ] Nested sub-models per adapter (`DatabaseSettings`, `LlmSettings`) with
+- [x] **1.5 `docs/conventions/settings.md`.**
+  - [x] Nested sub-models per adapter (`DatabaseSettings`, `LlmSettings`) with
         `env_nested_delimiter="__"` → `DB__URL`, `LLM__BASE_URL`. Existing flat fields
         (`HTTP_PORT`, `LOG_LEVEL`, ...) stay flat to avoid a breaking change.
-  - [ ] Secrets as `SecretStr`; never logged, never in span attributes.
-  - [ ] `get_settings()` is called only in the composition root; components receive their
+  - [x] Secrets as `SecretStr`; never logged, never in span attributes.
+  - [x] `get_settings()` is called only in the composition root; components receive their
         own settings slice through `__init__`. Tests build `Settings(...)` directly.
-  - [ ] Every new variable is added to `.env.example` with a comment.
+  - [x] Every new variable is added to `.env.example` with a comment.
 
-- [ ] **1.6 `docs/conventions/errors.md`.**
-  - [ ] Hierarchy: `DomainError` base in `domain/errors.py` → `NotFoundError`,
+- [x] **1.6 `docs/conventions/errors.md`.**
+  - [x] Hierarchy: `DomainError` base in `domain/errors.py` → `NotFoundError`,
         `ConflictError`, `ValidationError`, `ExternalServiceError`; feature errors subclass these.
-  - [ ] Adapters convert library exceptions (httpx2, SQLAlchemy, LLM client) into domain errors at the boundary.
-  - [ ] One exception handler in `api/errors.py` maps base classes to HTTP status + a single
+  - [x] Adapters convert library exceptions (httpx2, SQLAlchemy, LLM client) into domain errors at the boundary.
+  - [x] One exception handler in `api/errors.py` maps base classes to HTTP status + a single
         problem-details response shape. No per-route try/except for mapping.
-  - [ ] Logging rule: log once, where the error is handled, not at every layer.
+  - [x] Logging rule: log once, where the error is handled, not at every layer.
 
-- [ ] **1.7 `docs/conventions/persistence.md`**, rendered only when `with_database` (D6);
+- [x] **1.7 `docs/conventions/persistence.md`**, rendered only when `with_database` (D6);
       `AGENTS.md` links to it conditionally.
-  - [ ] Engine and `async_sessionmaker` created in lifespan; session per request through a dependency.
-  - [ ] Repository = class implementing a domain Protocol, takes `AsyncSession`, maps ORM ↔ domain.
-  - [ ] Transaction boundary: the use case's dependency commits on success and rolls back on error.
-  - [ ] SQLAlchemy 2.0 typed style only: `DeclarativeBase`, `Mapped[...]`, `mapped_column`, `select()`.
+  - [x] Engine and `async_sessionmaker` created in lifespan; session per request through a dependency.
+  - [x] Repository = class implementing a domain Protocol, takes `AsyncSession`, maps ORM ↔ domain.
+  - [x] Transaction boundary: the use case's dependency commits on success and rolls back on error.
+        As built in 3.9: one transaction per request (`DbSessionDep`), committed before the response.
+  - [x] SQLAlchemy 2.0 typed style only: `DeclarativeBase`, `Mapped[...]`, `mapped_column`, `select()`.
         No legacy `Query` API, no raw SQL string interpolation.
-  - [ ] Alembic: autogenerate, then review by hand; one migration per change; naming convention for constraints.
+  - [x] Alembic: autogenerate, then review by hand; one migration per change; naming convention for constraints.
         How to write a migration, step by step.
-  - [ ] Deployment (D11): `python -m <package> migrate` as a one-off job; expand/contract,
+  - [x] Deployment (D11): `python -m <package> migrate` as a one-off job; expand/contract,
         so every migration works with the release that is still running.
-  - [ ] `op.get_context().autocommit_block()` (e.g. `CREATE INDEX CONCURRENTLY`) commits the
+  - [x] `op.get_context().autocommit_block()` (e.g. `CREATE INDEX CONCURRENTLY`) commits the
         migration transaction mid-run, which also releases the advisory lock (`pg_advisory_xact_lock`).
-  - [ ] N+1 guidance: explicit `selectinload` and no lazy loading in async (`lazy="raise"`).
+  - [x] N+1 guidance: explicit `selectinload` and no lazy loading in async (`lazy="raise"`).
 
-- [ ] **1.7a `docs/conventions/caching.md`**, rendered only when `with_cache` (D10);
+- [x] **1.7a `docs/conventions/caching.md`**, rendered only when `with_cache` (D10);
       `AGENTS.md` links to it conditionally.
-  - [ ] Cache-aside only: read the cache, on a miss call the real source and write back.
+  - [x] Cache-aside only: read the cache, on a miss call the real source and write back.
         No write-through, no cache as the only copy of data.
-  - [ ] Ports named after the need (`RecipeCache`), adapter in `infrastructure/cache/`;
+  - [x] Ports named after the need (`RecipeCache`), adapter in `infrastructure/cache/`;
         application code never sees redis-py types.
-  - [ ] Keys: `<service>:<feature>:<version>:<id>`; bump `<version>` when the cached shape
+  - [x] Keys: `<service>:<feature>:<version>:<id>`; bump `<version>` when the cached shape
         changes instead of migrating old entries.
-  - [ ] Every write sets a TTL (`CACHE__DEFAULT_TTL_SECONDS` unless the feature needs another).
-  - [ ] Values are Pydantic models as JSON; a value that fails to parse is a miss.
-  - [ ] Failures: connection errors and timeouts become a miss, logged once as
+  - [x] Every write sets a TTL (`CACHE__DEFAULT_TTL_SECONDS` unless the feature needs another).
+  - [x] Values are Pydantic models as JSON; a value that fails to parse is a miss.
+  - [x] Failures: connection errors and timeouts become a miss, logged once as
         `cache.unavailable`; the request still succeeds. Invalidate by deleting the key
         after the source of truth changes.
-  - [ ] No secrets or personal data in keys. The redis instrumentation records commands
+  - [x] No secrets or personal data in keys. The redis instrumentation records commands
         without arguments (`GET ?`), so keys stay out of spans, but they show up in logs and in
         Valkey tooling (`MONITOR`, slowlog).
-  - [ ] A failed delete (Valkey down) leaves the old value until it expires: the TTL is the
+  - [x] A failed delete (Valkey down) leaves the old value until it expires: the TTL is the
         staleness bound.
-  - [ ] Hit ratio from the `cache.lookups` counter (3.16).
+  - [x] Hit ratio from the `cache.lookups` counter (3.16).
+  - The use case does the cache-aside through two ports (`RecipeReader`, `RecipeCache`);
+    a value that doesn't parse is logged as `cache.invalid_value`. The doc also says a
+    delete inside a request comes before the DB commit, so a concurrent reader can re-cache
+    the old value: one more reason the TTL is the staleness bound.
 
-- [ ] **1.8 `docs/conventions/testing.md`.**
-  - [ ] Port the boilerplate's **test philosophy hard rule**: test the requirement, not the
+- [x] **1.8 `docs/conventions/testing.md`.**
+  - [x] Port the boilerplate's **test philosophy hard rule**: test the requirement, not the
         implementation; cover happy path, edges, failures and invariants; if a requirement is
         unclear, stop and ask; coverage finds gaps but isn't the goal.
-  - [ ] Layout mirrors `src/`: `tests/domain`, `tests/application`, `tests/api`, `tests/infrastructure`.
-  - [ ] Fakes over mocks: in-memory fakes implementing ports (shared in `tests/fakes/`);
+  - [x] Layout mirrors `src/`: `tests/domain`, `tests/application`, `tests/api`, `tests/infrastructure`.
+  - [x] Fakes over mocks: in-memory fakes implementing ports (shared in `tests/fakes/`);
         `unittest.mock` only for things without a port.
-  - [ ] `@pytest.mark.parametrize` for edge-case tables; `pytest.raises(..., match=...)`.
-  - [ ] Integration tests for repositories against real Postgres via testcontainers (D7):
+  - [x] `@pytest.mark.parametrize` for edge-case tables; `pytest.raises(..., match=...)`.
+  - [x] Integration tests for repositories against real Postgres via testcontainers (D7):
         session-scoped container fixture, migrations applied once, each test in a rolled-back
         transaction, marked `integration`.
-  - [ ] (`with_cache`) the cache adapter against a real Valkey container, flushed between
+  - [x] (`with_cache`) the cache adapter against a real Valkey container, flushed between
         tests, marked `integration`; everything above the adapter uses an in-memory fake.
-  - [ ] Observability assertions with existing `span_exporter` / `log_exporter` fixtures.
+  - [x] Observability assertions with existing `span_exporter` / `log_exporter` fixtures.
 
-- [ ] **1.9 `docs/stack.md`.**
-  - [ ] Approved: FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx2,
+- [x] **1.9 `docs/stack.md`.**
+  - [x] Approved: FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx2,
         OpenTelemetry, SQLAlchemy 2 async + asyncpg + Alembic, Valkey via redis-py
         (`redis.asyncio`) as an optional cache (D10), pytest + pytest-asyncio + pytest-cov, ruff, pyright, import-linter, uv.
-  - [ ] Banned, with replacements: `requests`/`aiohttp`/`httpx` → httpx2 (Pydantic-maintained successor of httpx); Tortoise → SQLAlchemy;
+  - [x] Banned, with replacements: `requests`/`aiohttp`/`httpx` → httpx2 (Pydantic-maintained successor of httpx); Tortoise → SQLAlchemy;
         `dependency-injector`, `fastapi-class`, `fastapi-utils` → plain FastAPI DI;
         `valkey`/`valkey-glide` → redis-py (D10); Celery and stream consumers → not in the template (D14); Poetry/pip → uv; `logging.getLogger`/`print` →
         observability helpers. Auth libraries are not listed (D9).
-  - [ ] Rule: a new runtime dependency needs approval (already in AGENTS.md) and an entry here.
+  - [x] Rule: a new runtime dependency needs approval (already in AGENTS.md) and an entry here.
+- Examples (all of Phase 1): every Python block is a whole file (first line `# <path>`), an
+  addition (`# add to <path>`: imports go up, the rest at the end) or a context diff; blocks
+  without a path are standalone modules. A script renders every variant, pastes each doc's
+  examples (on top of the docs it builds on: errors ← models + settings, persistence and
+  caching ← models, testing ← architecture) and runs `make check`; it also checks every
+  link, anchor and code reference in `AGENTS.md`, `README.md` and `docs/`. The running
+  `recipes` example: entity, errors, ports and schemas in `models.md`; a required setting
+  in `settings.md` (diffs to `settings.py`, `tests/conftest.py`, `tests/test_settings.py`,
+  `.env.example`); an httpx2 adapter with `MockTransport` tests in `errors.md`; table,
+  repository, migrations (a real autogenerate output) and DB tests in `persistence.md`;
+  cache adapter, use case and tests in `caching.md`. Docs are `.md.jinja`; `_exclude` must
+  name the rendered path (`docs/conventions/persistence.md`), not the `.jinja` file.
 
 ## Phase 2: Enforcement in tooling
 
@@ -431,3 +456,4 @@ Open items that wait on something outside the chunks above.
 | 2026-10-26 | Scope cut: no events in the template → D14; D10 now covers only an opt-in Valkey cache (`with_cache`). New items 1.7a, 3.12–3.15, 5.7, 6.3a; 5.6 drops `add-event-handler`. |
 | 2026-10-26 | Chunk 3 done (3.12–3.15, 6.3a; D10, D14) on `feat/architecture-chunk-3`. Events removed: `add-event-handler`, `propagation.py` (`inject_trace_context` / `extract_trace_context`) and their rules; calls between services are HTTP via `HttpClientDep`. `with_cache` (default false) renders `CacheSettings` (`CACHE__URL` required, `redis://`/`rediss://`, TTL 300 s, 0.5 s timeouts), one `redis.asyncio` client in the lifespan (no ping, no readiness check) and `ValkeyCache` (`get`/`set`/`delete`, TTL on every write, connection errors and timeouts = miss or no-op logged as `cache.unavailable`). Decided while implementing: the generic `ValkeyCache` adapter (features wrap it); retries switched off explicitly (redis-py's `Redis()` defaults to 10); **`redis>=8.1` uncapped** (`opentelemetry-instrumentation-redis` 0.66b1 accepts `redis >= 2.6`); commands are traced without arguments, so keys stay out of spans (1.7a to adjust); testcontainers' `ValkeyContainer` with `valkey/valkey:9`; unit tests point the cache at a closed port, so the Valkey-down behaviour is tested without Docker. The readiness tests' example check `cache` was renamed to `storage`. CI matrix 2 × 2. |
 | 2026-10-26 | Chunk-3 review follow-up: Q8 answered in D11 (the migrate job gets the service's whole environment, so `CACHE__URL` too). `ValkeyCache` also treats `ReadOnlyError` and `OutOfMemoryError` as unavailable (integration tests switch the test Valkey to a replica and to `maxmemory 1`), and `cache.unavailable` logs carry `error_type`. Circuit breaker for a long outage not added (D10: one log per call; 0.5 s timeouts bound the cost). |
+| 2026-10-27 | Chunk 4 done (1.1–1.9, 1.7a, 3.16) on `feat/architecture-chunk-4`. Follow-ups F1–F3 added; F3 decided: 8.4 (meal-platform compose) comes before Phase 5, `make migration` keeps using `DB__URL`. `cache.lookups` counter (`result` = hit/miss/unavailable) and a `metric_reader` fixture in every variant. Agent docs: slim `AGENTS.md` (≤ 150 lines) + `docs/` with pasteable examples, verified per variant by script (examples pass `make check`; links, anchors and code references resolve). Checked against PostgreSQL 18: `autocommit_block()` releases the `pg_advisory_xact_lock` and it is not taken again, and the current revision is stamped only after `upgrade()`, so a failure after the block repeats it. `add-endpoint` no longer says to map errors to `HTTPException`. |
