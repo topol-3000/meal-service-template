@@ -373,15 +373,42 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 
 ## Phase 5: Skills (task recipes with code examples)
 
-- [ ] **5.1 `add-feature`**: new feature folder across all layers (domain → use case → adapter → router → tests).
-- [ ] **5.2 `add-use-case`**: use case class with ports, span, logging, unit test with fakes.
-- [ ] **5.3 `add-repository`** (only when `with_database`): ORM model, Protocol port, repository, migration, integration test.
-- [ ] **5.4 `add-setting`**: settings sub-model, `.env.example`, injection into a component, test.
-- [ ] **5.5 `add-external-client`**: port + httpx2 adapter, error conversion, retries/timeouts, fake.
-- [ ] **5.6** Update `add-endpoint` to link the new docs, use the `Annotated` dependencies,
+Skills are procedures and docs are rules: a skill is numbered steps that link to the doc
+sections holding the rules, plus one worked example. The worked examples continue the docs'
+`recipes` example into one feature, "how many days one batch of a recipe feeds the family"
+(`days_fed`, `CountDaysFed`, `GET /recipes/{recipe_id}/days-fed`), which works in every variant
+because its recipes come from meal-recipes over HTTP. Their code is checked like the docs'
+(`tools/docs-check/`, `DEPENDS` chains from one skill to the next).
+
+- [x] **5.1 `add-feature`**: new feature folder across all layers (domain → use case → adapter → router → tests).
+      The order of work, each step pointing to a skill or doc; the worked example is a table
+      of the feature's files and which doc or skill writes each.
+- [x] **5.2 `add-use-case`**: use case class with ports, span, logging, unit test with fakes.
+      Example: `days_fed()` + `InvalidFamilySizeError` in the domain, `CountDaysFed` on
+      `RecipeReader`, the shared `FakeRecipeReader` (same as in `caching.md`), domain and use-case tests.
+- [x] **5.3 `add-repository`** (only when `with_database`): ORM model, Protocol port, repository, migration, integration test.
+      The worked example is persistence.md's recipes table, mapped step by step (no second copy).
+- [x] **5.4 `add-setting`**: settings sub-model, `.env.example`, injection into a component, test.
+      Example: `RECIPES_API__TIMEOUT_SECONDS` (a default, in an existing slice) passed per
+      request by `HttpRecipeReader`; settings.md keeps the required-setting example.
+- [x] **5.5 `add-external-client`**: port + httpx2 adapter, error conversion, retries/timeouts, fake.
+      Timeouts only: the rule is a new "Timeouts" section in `errors.md` (shared client's by
+      default, `timeout_seconds` in the slice passed per request). Retries are left out until
+      there is a decision. Example: the provider `get_count_days_fed` on `HttpClientDep` and a
+      timeout test; the adapter and its `MockTransport` tests stay in `errors.md`.
+- [x] **5.6** Update `add-endpoint` to link the new docs, use the `Annotated` dependencies,
       `ApiModel`, and the central error handler.
-- [ ] **5.7 `add-cache`** (only when `with_cache`): cache-aside around an existing port, key
+      Rewritten: schemas, provider + alias, route without try/except, `include_router`,
+      `client` with an overridden provider (`db_client` for database routes), contract.
+      Example: `GET /recipes/{recipe_id}/days-fed` with 200, 404 and 422 tests.
+- [x] **5.7 `add-cache`** (only when `with_cache`): cache-aside around an existing port, key
       and TTL, Pydantic value model, fake for unit tests, integration test against Valkey.
+      The worked example is caching.md's; the skill adds its provider (`get_find_recipe`, with
+      meal-recipes as the source of truth) and a test that a lookup works while Valkey is down.
+- `add-repository` and `add-cache` are excluded by their rendered paths in `_exclude`;
+  `AGENTS.md` and `add-feature` list them only in their variants. `verify-observability`
+  now starts with the test fixtures (`metric_reader` included), waits for the 15 s metric
+  interval of `.env.example` and queries `cache_lookups_total` with `with_cache`.
 
 ## Phase 6: CI and security
 
@@ -457,3 +484,4 @@ Open items that wait on something outside the chunks above.
 | 2026-10-26 | Chunk 3 done (3.12–3.15, 6.3a; D10, D14) on `feat/architecture-chunk-3`. Events removed: `add-event-handler`, `propagation.py` (`inject_trace_context` / `extract_trace_context`) and their rules; calls between services are HTTP via `HttpClientDep`. `with_cache` (default false) renders `CacheSettings` (`CACHE__URL` required, `redis://`/`rediss://`, TTL 300 s, 0.5 s timeouts), one `redis.asyncio` client in the lifespan (no ping, no readiness check) and `ValkeyCache` (`get`/`set`/`delete`, TTL on every write, connection errors and timeouts = miss or no-op logged as `cache.unavailable`). Decided while implementing: the generic `ValkeyCache` adapter (features wrap it); retries switched off explicitly (redis-py's `Redis()` defaults to 10); **`redis>=8.1` uncapped** (`opentelemetry-instrumentation-redis` 0.66b1 accepts `redis >= 2.6`); commands are traced without arguments, so keys stay out of spans (1.7a to adjust); testcontainers' `ValkeyContainer` with `valkey/valkey:9`; unit tests point the cache at a closed port, so the Valkey-down behaviour is tested without Docker. The readiness tests' example check `cache` was renamed to `storage`. CI matrix 2 × 2. |
 | 2026-10-26 | Chunk-3 review follow-up: Q8 answered in D11 (the migrate job gets the service's whole environment, so `CACHE__URL` too). `ValkeyCache` also treats `ReadOnlyError` and `OutOfMemoryError` as unavailable (integration tests switch the test Valkey to a replica and to `maxmemory 1`), and `cache.unavailable` logs carry `error_type`. Circuit breaker for a long outage not added (D10: one log per call; 0.5 s timeouts bound the cost). |
 | 2026-10-27 | Chunk 4 done (1.1–1.9, 1.7a, 3.16) on `feat/architecture-chunk-4`. Follow-ups F1–F3 added; F3 decided: 8.4 (meal-platform compose) comes before Phase 5, `make migration` keeps using `DB__URL`. `cache.lookups` counter (`result` = hit/miss/unavailable) and a `metric_reader` fixture in every variant. Agent docs: slim `AGENTS.md` (≤ 150 lines) + `docs/` with pasteable examples, verified per variant by script (examples pass `make check`; links, anchors and code references resolve). Checked against PostgreSQL 18: `autocommit_block()` releases the `pg_advisory_xact_lock` and it is not taken again, and the current revision is stamped only after `upgrade()`, so a failure after the block repeats it. `add-endpoint` no longer says to map errors to `HTTPException`. |
+| 2026-10-27 | Chunk 5 done (5.1–5.7) on `feat/architecture-chunk-5`. First, the doc checkers moved into `tools/docs-check/` (service dir as argument, `DEPENDS` root-relative and transitive), cover `.claude/skills/*/SKILL.md`, and run in every CI variant after `make check`; the template's `AGENTS.md` documents the example conventions. Planted errors (a bad reference, a broken example) fail them. Skills: `add-feature`, `add-use-case`, `add-setting`, `add-external-client`, `add-endpoint` (rewritten), `add-repository` (`with_database`), `add-cache` (`with_cache`); `verify-observability` brought up to date. Decided while implementing: worked examples extend the `recipes` example over HTTP so they run in every variant; a timeout rule in `errors.md`; retries left out of 5.5. Rendered `AGENTS.md`: 131–150 lines. 8.4 (meal-platform compose) is still open, so `make migration` in `add-repository` needs a PostgreSQL started by hand until it lands. |
