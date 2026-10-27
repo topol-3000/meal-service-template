@@ -44,6 +44,14 @@ jobs:
         run: |
           git add -A
           uv run pre-commit run --all-files
+      - name: Agent docs reference what exists
+        working-directory: ${{ runner.temp }}/meal-sample
+        # Links, anchors and code names in AGENTS.md, README.md, docs/ and skills.
+        run: uv run python "$GITHUB_WORKSPACE/tools/docs-check/check_refs.py" .
+      - name: Agent doc examples pass make check
+        working-directory: ${{ runner.temp }}/meal-sample
+        # Pastes each doc's and skill's examples into the service, one file at a time.
+        run: python3 "$GITHUB_WORKSPACE/tools/docs-check/check_examples.py" .
       - name: Layer contracts reject forbidden imports
         working-directory: ${{ runner.temp }}/meal-sample
         run: |
