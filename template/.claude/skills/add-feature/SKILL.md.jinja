@@ -1,0 +1,59 @@
+---
+name: add-feature
+description: Plan and build a new capability of this service that spans several layers (domain rule, use case, adapters, endpoint, tests), e.g. "show how many days a batch feeds the family" or "import recipes by URL". Breaks the work into the other skills in order. Not for a change that stays inside one layer.
+---
+
+# Add a feature
+
+A feature is a slice through every layer, grouped by its name in each one
+([layers](../../../docs/architecture.md#layers)). This skill is the order of work; each
+step is another skill or doc with the details.
+
+## Steps
+
+1. **Requirements.** Write down the behaviour, the edge cases and the failures before any
+   code. If one is unclear, stop and ask
+   ([test philosophy](../../../docs/conventions/testing.md#test-philosophy-hard-rule)).
+2. **Name and place.** One feature name (`recipes`) used in `domain/<feature>/`,
+   `application/<feature>/`, `api/<feature>.py` and the mirrored `tests/` folders. The
+   "Where does new code go?" table in `AGENTS.md` places each file.
+3. **Domain.** Entities, value objects, rules and feature errors
+   ([models.md](../../../docs/conventions/models.md#domain-models),
+   [errors.md](../../../docs/conventions/errors.md#the-hierarchy)); a port for each thing
+   outside the service.
+4. **Use cases**, one per operation: `add-use-case`.
+5. **Configuration** the adapters need: `add-setting`.
+6. **Adapters**, one per port:
+   - another service or HTTP API: `add-external-client`
+{%- if with_database %}
+   - this service's tables: `add-repository`
+{%- endif %}
+{%- if with_cache %}
+   - a slow lookup worth caching: `add-cache`
+{%- endif %}
+   - a new client or pool with a lifetime:
+     [composition root](../../../docs/architecture.md#composition-root)
+7. **Endpoints**: `add-endpoint` (provider, router, `include_router`, contract).
+8. **Check it.** `make check`; with new spans, logs or metrics, also `verify-observability`.
+
+## Worked example
+
+"How many days does one batch of a recipe feed the family?", built by the skills' worked
+examples on top of the `recipes` example in the docs, in the order of the steps:
+
+| File | What | Where |
+|---|---|---|
+| `domain/recipes/recipe.py` | `Recipe`, `RecipeNotFoundError` | [models.md](../../../docs/conventions/models.md#domain-models) |
+| `domain/recipes/recipe.py` | `days_fed()`, `InvalidFamilySizeError` | `add-use-case` |
+| `domain/recipes/ports.py` | `RecipeReader` | [models.md](../../../docs/conventions/models.md#domain-models) |
+| `application/recipes/count_days_fed.py` | `CountDaysFed`, its fake and tests | `add-use-case` |
+| `settings.py`, `.env.example` | `RECIPES_API__BASE_URL` | [settings.md](../../../docs/conventions/settings.md#example-a-required-setting) |
+| `settings.py`, `.env.example` | `RECIPES_API__TIMEOUT_SECONDS` | `add-setting` |
+| `infrastructure/recipes_api.py` | `HttpRecipeReader` and its `MockTransport` tests | [errors.md](../../../docs/conventions/errors.md#adapters-convert-library-errors) |
+| `api/dependencies.py` | `get_count_days_fed`, `CountDaysFedDep` | `add-external-client` |
+| `api/recipes.py`, `main.py` | `DaysFedResponse`, the route, `include_router` | `add-endpoint` |
+
+The `plans` feature in [architecture.md](../../../docs/architecture.md#how-dependencies-reach-routes)
+is a smaller one, all in one place: a rule, a `Clock` port, a use case, an adapter, a
+provider and a route, with its tests in
+[testing.md](../../../docs/conventions/testing.md#example-tests-for-a-use-case).

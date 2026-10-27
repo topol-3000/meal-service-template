@@ -1,0 +1,78 @@
+---
+name: add-external-client
+description: Call an HTTP API outside this service (another meal-* service or a third-party API) through a domain port and an httpx2 adapter on the shared client, with error conversion, timeouts and MockTransport tests. Use when code needs data or an action from another service.
+---
+
+# Add a client for another service
+
+The application sees a port; an adapter in `infrastructure/` speaks HTTP through the one
+shared httpx2 client and turns every failure into a domain error. The rules are in
+[errors.md](../../../docs/conventions/errors.md#adapters-convert-library-errors) and
+[architecture.md](../../../docs/architecture.md#composition-root).
+
+## Steps
+
+1. **Port.** A `Protocol` in `domain/<feature>/ports.py`, named after what the caller needs
+   (`RecipeReader`, not `RecipesApiClient`), taking and returning domain types. Its
+   docstrings name the domain errors it raises.
+2. **Settings slice.** A sub-model for the API: the base URL (required) and, when it should
+   answer sooner than the shared client allows, `timeout_seconds`. See `add-setting`.
+3. **Adapter.** `infrastructure/<name>_api.py`. `__init__` takes the shared
+   `httpx2.AsyncClient` and the settings slice; it never creates a client. The answer is
+   parsed into a private Pydantic payload model that applies the domain's limits, then
+   mapped to domain objects. Payloads never leave the adapter.
+4. **Error conversion.** Transport errors and timeouts → `ExternalServiceError`; the
+   API's "not found" → the feature's `NotFoundError` subclass; any other error status or a
+   payload that doesn't parse → `ExternalServiceError`. Always `raise ... from exc`
+   ([hierarchy](../../../docs/conventions/errors.md#the-hierarchy)).
+5. **Timeouts.** Pass the slice's timeout with each request
+   ([timeouts](../../../docs/conventions/errors.md#timeouts)).
+6. **Adapter tests** with `httpx2.MockTransport` in `tests/infrastructure/`: the request
+   (method, URL), the mapping of a good answer, one row per failure, an unreachable
+   service and a timeout. No network.
+7. **Wire it.** The provider of the use case in `api/dependencies.py` takes
+   `HttpClientDep` and `SettingsDep` and builds the adapter. Tests above the adapter use a
+   fake of the port, not `MockTransport` ([fakes](../../../docs/conventions/testing.md#fakes-over-mocks)).
+8. **Contract.** The other service's OpenAPI copy in meal-platform `contracts/openapi/`
+   says what it sends; parse only the fields you use.
+9. `make check`.
+
+## Worked example
+
+meal-recipes' API behind `RecipeReader`. Steps 1–6 are already written up: the port in
+[models.md](../../../docs/conventions/models.md#domain-models), the base URL in
+[settings.md](../../../docs/conventions/settings.md#example-a-required-setting), the
+adapter and its `MockTransport` tests in
+[errors.md](../../../docs/conventions/errors.md#adapters-convert-library-errors), the
+timeout in `add-setting`. What is left is a timeout test and the wiring into `CountDaysFed`
+from `add-use-case`.
+
+A timeout fails like a refused connection:
+
+```python
+# add to tests/infrastructure/test_recipes_api.py
+async def test_a_timeout_is_an_external_service_error() -> None:
+    def too_slow(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(ExternalServiceError, match="did not answer"):
+        await _get(too_slow)
+```
+
+The provider builds the adapter on the shared client and the service's settings:
+
+```python
+# add to src/{{ package_name }}/api/dependencies.py
+from {{ package_name }}.application.recipes.count_days_fed import CountDaysFed
+from {{ package_name }}.infrastructure.recipes_api import HttpRecipeReader
+
+
+def get_count_days_fed(http_client: HttpClientDep, settings: SettingsDep) -> CountDaysFed:
+    return CountDaysFed(HttpRecipeReader(http_client, settings.recipes_api))
+
+
+type CountDaysFedDep = Annotated[CountDaysFed, Depends(get_count_days_fed)]
+```
+
+`add-endpoint` serves it over HTTP; its tests override `get_count_days_fed` with
+`CountDaysFed(FakeRecipeReader(...))`.

@@ -175,6 +175,15 @@ async def test_an_unreachable_service_is_an_external_service_error() -> None:
     with pytest.raises(ExternalServiceError, match="did not answer"):
         await _get(refuse)
 ```
+
+### Timeouts
+
+Every outgoing call has a timeout. The shared client's (`HTTP_CLIENT__TIMEOUT_SECONDS`,
+`HTTP_CLIENT__CONNECT_TIMEOUT_SECONDS`) is the default. A dependency that should answer
+sooner gets `timeout_seconds` in its settings slice, and its adapter passes it with each
+request (`timeout=`); it never builds a client of its own for that. A timeout is an
+`httpx2.HTTPError` like a refused connection, so the adapter turns it into an
+`ExternalServiceError` too.
 {%- if with_database %}
 
 Repositories do the same with SQLAlchemy: an `IntegrityError` on a unique key becomes a

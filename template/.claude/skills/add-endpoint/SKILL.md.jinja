@@ -1,31 +1,135 @@
 ---
 name: add-endpoint
-description: Add an HTTP endpoint to this service following the layering, tracing and testing rules. Use when asked to add or change a REST endpoint.
+description: Add or change an HTTP route of this service's API (path, parameters, request and response schemas, status codes) on top of a use case, with its provider, router registration, API tests and OpenAPI contract. Use when the operation exists or is being added with add-use-case and only needs to be exposed over HTTP.
 ---
 
 # Add an HTTP endpoint
 
-1. **Domain first.** If the endpoint needs new concepts, add entities/value objects and a port
-   (`typing.Protocol`) in `src/{{ package_name }}/domain/`. No framework imports there.
-2. **Use case.** Add `src/{{ package_name }}/application/<verb>_<noun>.py` with one class or
-   function that takes its ports as constructor/function arguments. Wrap the body in a span:
-   ```python
-   tracer = get_tracer(__name__)
-   logger = get_logger(__name__)
+A route only handles HTTP: it validates input with schemas, calls one use case through a
+typed dependency and maps the result to a response. The rules are in
+[architecture.md](../../../docs/architecture.md#how-dependencies-reach-routes),
+[models.md](../../../docs/conventions/models.md#api-schemas) and
+[errors.md](../../../docs/conventions/errors.md#one-place-maps-errors-to-http).
+
+## Steps
+
+1. **The use case exists** (`add-use-case`). No business rule goes into the route.
+2. **Schemas** in `api/<feature>.py`, next to the router: subclasses of `ApiModel`,
+   separate request and response models, constraints in the types, `to_domain()` on a
+   request and `from_domain()` on a response. Domain objects never go out as they are.
+3. **Provider and alias** in `api/dependencies.py`: `get_<use_case>()` takes what the
+   adapters need (`SettingsDep`, `HttpClientDep`{% if with_database %}, `DbSessionDep`{% endif %}{% if with_cache %}, `CacheDep`{% endif %}), builds them and returns the
+   use case; then `type <UseCase>Dep = Annotated[<UseCase>, Depends(get_<use_case>)]`.
+   The route never reads `request.app.state` and never builds an adapter.
+4. **Route** on the feature's `router = APIRouter(prefix="/<feature>", tags=["<feature>"])`:
+   path and query parameters typed (`Annotated[int, Query(ge=1)]`), the use case by its
+   alias, the response model as return type, `status_code=HTTPStatus.CREATED` for a
+   creation. Errors are not caught here: a domain error propagates to the handlers in
+   `api/errors.py`, which answer with problem details. Never `raise HTTPException` for a
+   domain condition.
+5. **Register** the router once per feature: `app.include_router(<feature>.router)` in
+   `create_app()` (`main.py`).
+6. **Tests** in `tests/api/test_<feature>.py` with the `client` fixture and the provider
+   overridden by the use case on fakes (`app.dependency_overrides[get_<use_case>]`): the
+   happy path, each domain error as its status with `application/problem+json`, and the
+   422 for invalid input ([fakes](../../../docs/conventions/testing.md#fakes-over-mocks)).
+{%- if with_database %}
+   A route that uses the database is tested with `db_client`, never `TestClient`
+   ([integration tests](../../../docs/conventions/testing.md#integration-tests)).
+{%- endif %}
+7. **Contract.** When another service calls this API, update its OpenAPI copy in
+   meal-platform `contracts/openapi/` (the running app serves it at /openapi.json) in the
+   same change.
+8. `make check`.
+
+## Worked example
+
+`CountDaysFed` from `add-use-case`, wired by `add-external-client`, served as
+GET /recipes/{recipe_id}/days-fed?family_size=4. The schemas module is the one from
+[models.md](../../../docs/conventions/models.md#api-schemas){% if with_database %}; the
+POST /recipes route in [persistence.md](../../../docs/conventions/persistence.md#example-a-recipes-table)
+is a database-backed example{% endif %}.
+
+```python
+# add to src/{{ package_name }}/api/recipes.py
+from fastapi import APIRouter, Query
+
+from {{ package_name }}.api.dependencies import CountDaysFedDep
+
+router = APIRouter(prefix="/recipes", tags=["recipes"])
 
 
-   async def import_recipe(url: str, importer: RecipeImporter) -> Recipe:
-       with tracer.start_as_current_span("recipe.import") as span:
-           span.set_attribute("recipe.url", url)
-           recipe = await importer.fetch(url)
-           logger.info("recipe.imported", recipe_id=str(recipe.id))
-           return recipe
-   ```
-3. **Unit test the use case** in `tests/application/` with an in-memory fake for each port.
-4. **Router.** Add or extend a module in `src/{{ package_name }}/api/`. Request and response
-   are Pydantic models defined next to the router, never domain objects directly.
-   Include the router in `main.py`.
-5. **API test** with the `client` fixture: happy path plus one error case.
-6. **Contract.** If the API is used by another service, update the OpenAPI copy in
-   meal-platform `contracts/openapi/{{ service_name }}.yaml` (`/openapi.json` of the running app).
-7. Run `make check`.
+class DaysFedResponse(ApiModel):
+    days: int
+
+
+@router.get("/{recipe_id}/days-fed")
+async def get_days_fed(
+    recipe_id: UUID,
+    family_size: Annotated[int, Query(ge=1)],
+    count_days_fed: CountDaysFedDep,
+) -> DaysFedResponse:
+    return DaysFedResponse(days=await count_days_fed(recipe_id, family_size))
+```
+
+An unknown recipe raises `RecipeNotFoundError` in the adapter, which becomes a 404; a
+`family_size` of 0 is a 422 from the query constraint before the use case runs.
+
+```diff
+--- src/{{ package_name }}/main.py
++++ src/{{ package_name }}/main.py
+@@
+-from {{ package_name }}.api import health
++from {{ package_name }}.api import health, recipes
+@@
+     app.include_router(health.router)
++    app.include_router(recipes.router)
+```
+
+```python
+# tests/api/test_recipes.py
+from uuid import uuid4
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from {{ package_name }}.api.dependencies import get_count_days_fed
+from {{ package_name }}.application.recipes.count_days_fed import CountDaysFed
+from {{ package_name }}.domain.recipes.recipe import Recipe
+from tests.fakes.recipes import FakeRecipeReader
+
+_SOUP = Recipe(id=uuid4(), title="Lentil soup", servings=8)
+
+
+@pytest.fixture
+def app(app: FastAPI) -> FastAPI:
+    """The app reading recipes from a fake instead of meal-recipes."""
+    app.dependency_overrides[get_count_days_fed] = lambda: CountDaysFed(FakeRecipeReader(_SOUP))
+    return app
+
+
+def test_returns_the_days_a_batch_feeds_the_family(client: TestClient) -> None:
+    response = client.get(f"/recipes/{_SOUP.id}/days-fed", params={"family_size": 4})
+
+    assert response.status_code == 200
+    assert response.json() == {"days": 2}
+
+
+def test_an_unknown_recipe_is_a_404_problem(client: TestClient) -> None:
+    recipe_id = uuid4()
+
+    response = client.get(f"/recipes/{recipe_id}/days-fed", params={"family_size": 4})
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["detail"] == f"Recipe {recipe_id} does not exist"
+
+
+@pytest.mark.parametrize("params", [{}, {"family_size": 0}], ids=["missing", "zero"])
+def test_family_size_must_be_a_positive_number(client: TestClient, params: dict[str, int]) -> None:
+    response = client.get(f"/recipes/{_SOUP.id}/days-fed", params=params)
+
+    assert response.status_code == 422
+    assert [error["loc"] for error in response.json()["errors"]] == [["query", "family_size"]]
+```

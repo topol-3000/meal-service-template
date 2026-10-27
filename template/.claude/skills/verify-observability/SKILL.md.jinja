@@ -1,33 +1,67 @@
 ---
 name: verify-observability
-description: Check that traces, logs and metrics of this service reach Grafana (Tempo, Loki, Prometheus/Mimir) from meal-platform. Use after adding spans/logs or when telemetry seems missing.
+description: Check that this service's traces, logs and metrics are produced (in tests) and reach Grafana (Tempo, Loki, Prometheus) from meal-platform. Use after adding spans, log events or metrics, or when telemetry seems to be missing.
 ---
 
 # Verify observability end to end
 
-Prerequisite: meal-platform is up (`make up` there); Grafana LGTM listens on
-`localhost:3000` (UI), `4318` (OTLP HTTP).
+What the service must emit is in the observability section of `AGENTS.md`; how it is set
+up is in `observability/` (`setup_telemetry`, `instrument_app`, `configure_logging`).
 
-1. Run the service: `cp .env.example .env && make run` (or `make docker-run`).
-2. Generate traffic: `curl -s localhost:{{ http_port }}/docs > /dev/null` or call the endpoint
-   you changed. Health probes are excluded from tracing on purpose.
-3. Wait ~10 s (batch exporters), then check each signal through the Grafana API:
-   ```bash
-   # Traces (Tempo): last traces of this service
-   curl -s -G localhost:3000/api/datasources/proxy/uid/tempo/api/search \
-     --data-urlencode 'q={resource.service.name="{{ service_name }}"}' | jq '.traces[:3]'
+## Steps
 
-   # Logs (Loki)
-   curl -s -G localhost:3000/api/datasources/proxy/uid/loki/loki/api/v1/query_range \
-     --data-urlencode 'query={service_name="{{ service_name }}"}' --data-urlencode 'limit=5' | jq '.data.result'
+1. **In tests first.** Assert the new span (name, attributes) with `span_exporter`, a
+   metric with `metric_reader` and a log event with `capsys` after `configure_logging`
+   ([fixtures](../../../docs/conventions/testing.md#fixtures)). `make test` must pass
+   before anything below.
+2. **Start meal-platform** (`make up` in that repository): Grafana with Tempo, Loki and
+   Prometheus on port 3000, OTLP over HTTP on port 4318.
+3. **Run the service**: `cp .env.example .env && make run` (or `make docker-run`). The
+   `.env` turns on export (`OTEL_ENABLED=true`, `OTEL_EXPORTER_OTLP_ENDPOINT`) and pushes
+   metrics every 15 s (`OTEL_METRIC_EXPORT_INTERVAL`).
+{%- if with_database %}
+   PostgreSQL at `DB__URL` must be up (meal-platform runs it).
+{%- endif %}
+{%- if with_cache %}
+   Valkey may be down: every lookup is then a miss.
+{%- endif %}
+4. **Make traffic**: call the endpoint you changed (`curl -s localhost:{{ http_port }}/docs`
+   if there is none yet). Health probes are not traced, on purpose.
+5. **Wait about 15 s** (batched spans and logs, the metric interval), then query each signal
+   through Grafana's API (example below). Expect at least one trace, the log lines of the
+   request and the metric series.
+6. **In the UI** (Explore → Tempo, search by service): open a trace, check that the use
+   case span sits under the server span and the HTTP{% if with_database %} / SQL{% endif %}{% if with_cache %} / Valkey{% endif %} client spans under it,
+   and use "Logs for this span": log lines carry `trace_id` and `span_id`.
 
-   # Metrics (Prometheus)
-   curl -s -G localhost:3000/api/datasources/proxy/uid/prometheus/api/v1/query \
-     --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="{{ service_name }}"}' | jq '.data.result'
-   ```
-4. In the UI: Explore → Tempo → search by service; open a trace and use "Logs for this span"
-   to confirm logs are linked by `trace_id`.
-
-If nothing arrives: check `OTEL_ENABLED=true`, `OTEL_EXPORTER_OTLP_ENDPOINT`
-(`http://localhost:4318` from host, `http://lgtm:4318` inside compose) and the service's
+Nothing arrives? Check `OTEL_ENABLED=true`, `OTEL_EXPORTER_OTLP_ENDPOINT`
+(`http://localhost:4318` from the host, `http://lgtm:4318` inside compose) and the service's
 stdout for exporter errors.
+
+## Worked example
+
+After `make run` and a few requests:
+
+```bash
+# Traces (Tempo): the latest traces of this service
+curl -s -G localhost:3000/api/datasources/proxy/uid/tempo/api/search \
+  --data-urlencode 'q={resource.service.name="{{ service_name }}"}' | jq '.traces[:3]'
+
+# Logs (Loki)
+curl -s -G localhost:3000/api/datasources/proxy/uid/loki/loki/api/v1/query_range \
+  --data-urlencode 'query={service_name="{{ service_name }}"}' --data-urlencode 'limit=5' | jq '.data.result'
+
+# Metrics (Prometheus): OTLP names get underscores, the unit and, for counters, _total
+curl -s -G localhost:3000/api/datasources/proxy/uid/prometheus/api/v1/query \
+  --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="{{ service_name }}"}' | jq '.data.result'
+{%- if with_cache %}
+
+# Cache lookups by result (hit, miss, unavailable)
+curl -s -G localhost:3000/api/datasources/proxy/uid/prometheus/api/v1/query \
+  --data-urlencode 'query=sum by (result) (cache_lookups_total{service_name="{{ service_name }}"})' | jq '.data.result'
+{%- endif %}
+```
+
+A business metric `recipes.imported` (a counter) is queried as `recipes_imported_total`.
+{%- if with_cache %} The hit ratio of the cache is in
+[caching.md](../../../docs/conventions/caching.md#hit-ratio).{% endif %}

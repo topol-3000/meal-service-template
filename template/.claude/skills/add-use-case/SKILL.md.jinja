@@ -1,0 +1,194 @@
+---
+name: add-use-case
+description: Add or change one operation of this service in application/ (a use case class with its domain rule, ports, span and unit tests with fakes). Use when the work is business logic behind an existing or planned entry point; for a whole new capability with endpoint and adapters use add-feature.
+---
+
+# Add a use case
+
+A use case is one operation the service performs: a class in `application/<feature>/`
+that gets its ports in `__init__` and does the work in `__call__`. The rules are in
+[architecture.md](../../../docs/architecture.md#how-dependencies-reach-routes),
+[python.md](../../../docs/conventions/python.md#classes-functions-and-solid) and the
+observability section of `AGENTS.md`.
+
+## Steps
+
+1. **Rules go in the domain.** A limit, a calculation or a state change the operation
+   applies is a function or method in `domain/<feature>/`, raising a feature error that
+   subclasses a class in `domain/errors.py`
+   ([models.md](../../../docs/conventions/models.md#domain-models),
+   [errors.md](../../../docs/conventions/errors.md#the-hierarchy)). The use case
+   orchestrates; it does not decide.
+2. **A port for everything outside.** Whatever the use case reads or writes is a
+   `Protocol` in `domain/<feature>/ports.py`, named after the need (`RecipeReader`), with
+   the domain errors it raises in its docstrings. Reuse a port that fits. A new port needs
+   an adapter: `add-external-client`{% if with_database %}, `add-repository`{% endif %}{% if with_cache %}, `add-cache`{% endif %}.
+3. **The class.** `application/<feature>/<verb>_<noun>.py`, the class named after the file
+   ([naming](../../../docs/conventions/python.md#naming-and-files)). `__init__` takes the
+   ports, typed as the Protocols, never as adapters; `__call__` is the operation.
+4. **Span and logs.** Wrap the body in `_tracer.start_as_current_span("<entity>.<verb>")`:
+   the entity singular, like `recipe.count_days_fed` and `plan.generate`. Put ids and
+   results on the span as attributes. Log an event for what the operation
+   changed (`recipe.imported`, ids as keys). Errors propagate: no try/except to log or map
+   them ([errors.md](../../../docs/conventions/errors.md#catching)).
+5. **Fakes.** An in-memory fake per port in `tests/fakes/<feature>.py` that raises what the
+   port documents ([testing.md](../../../docs/conventions/testing.md#fakes-over-mocks)).
+   Add to the file when it exists.
+6. **Tests**, in modules that mirror `src/` ([layout](../../../docs/conventions/testing.md#layout)):
+   the domain rule's edges as a table, then the use case with fakes: happy path, every
+   error, the span ([test philosophy](../../../docs/conventions/testing.md#test-philosophy-hard-rule)).
+7. **Wire it** when something calls it: a provider and alias in `api/dependencies.py`
+   (`add-external-client` shows one, `add-endpoint` the route).
+8. `make check`.
+
+## Worked example
+
+How many days one batch of a recipe feeds a family, for batch cooking. It builds on the
+`Recipe` entity and the `RecipeReader` port in
+[models.md](../../../docs/conventions/models.md#domain-models).
+
+The rule, in the domain:
+
+```python
+# add to src/{{ package_name }}/domain/recipes/recipe.py
+class InvalidFamilySizeError(ValidationError):
+    def __init__(self, family_size: int) -> None:
+        super().__init__(f"A family has at least 1 person, not {family_size}")
+
+
+def days_fed(recipe: Recipe, family_size: int) -> int:
+    """Whole days one batch of `recipe` feeds a family of `family_size`, one meal a day."""
+    if family_size < 1:
+        raise InvalidFamilySizeError(family_size)
+    return recipe.servings // family_size
+```
+
+The use case. It only reads, so the span with its attributes is the whole record:
+
+```python
+# src/{{ package_name }}/application/recipes/count_days_fed.py
+from {{ package_name }}.domain.recipes.ports import RecipeReader
+from {{ package_name }}.domain.recipes.recipe import RecipeId, days_fed
+from {{ package_name }}.observability import get_tracer
+
+_tracer = get_tracer(__name__)
+
+
+class CountDaysFed:
+    """How many days one batch of a recipe feeds the family."""
+
+    def __init__(self, recipes: RecipeReader) -> None:
+        self._recipes = recipes
+
+    async def __call__(self, recipe_id: RecipeId, family_size: int) -> int:
+        with _tracer.start_as_current_span("recipe.count_days_fed") as span:
+            span.set_attribute("recipe.id", str(recipe_id))
+            span.set_attribute("family.size", family_size)
+            days = days_fed(await self._recipes.get(recipe_id), family_size)
+            span.set_attribute("recipe.days_fed", days)
+            return days
+```
+
+The fake of `RecipeReader`, shared by every test that reads recipes:
+
+```python
+# tests/fakes/recipes.py
+from {{ package_name }}.domain.recipes.recipe import Recipe, RecipeId, RecipeNotFoundError
+
+
+class FakeRecipeReader:
+    """`RecipeReader` over a dict. `reads` counts the calls."""
+
+    def __init__(self, *recipes: Recipe) -> None:
+        self.recipes = {recipe.id: recipe for recipe in recipes}
+        self.reads = 0
+
+    async def get(self, recipe_id: RecipeId) -> Recipe:
+        self.reads += 1
+        if recipe_id not in self.recipes:
+            raise RecipeNotFoundError(recipe_id)
+        return self.recipes[recipe_id]
+```
+
+The rule's edges, as a table:
+
+```python
+# tests/domain/recipes/test_recipe.py
+from uuid import uuid4
+
+import pytest
+
+from {{ package_name }}.domain.recipes.recipe import InvalidFamilySizeError, Recipe, days_fed
+
+
+def _recipe(servings: int) -> Recipe:
+    return Recipe(id=uuid4(), title="Lentil soup", servings=servings)
+
+
+@pytest.mark.parametrize(
+    ("servings", "family_size", "days"),
+    [(8, 4, 2), (9, 4, 2), (3, 4, 0), (1, 1, 1)],
+    ids=["exact", "leftovers are not a day", "less than a day", "smallest"],
+)
+def test_a_batch_feeds_the_family_for_whole_days(
+    servings: int, family_size: int, days: int
+) -> None:
+    assert days_fed(_recipe(servings), family_size) == days
+
+
+@pytest.mark.parametrize("family_size", [0, -1])
+def test_a_family_has_at_least_one_person(family_size: int) -> None:
+    with pytest.raises(InvalidFamilySizeError, match=rf"not {family_size}$"):
+        days_fed(_recipe(4), family_size)
+```
+
+The use case, with the fake: the result, each error, the span.
+
+```python
+# tests/application/recipes/test_count_days_fed.py
+from uuid import uuid4
+
+import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+from {{ package_name }}.application.recipes.count_days_fed import CountDaysFed
+from {{ package_name }}.domain.recipes.recipe import (
+    InvalidFamilySizeError,
+    Recipe,
+    RecipeNotFoundError,
+)
+from tests.fakes.recipes import FakeRecipeReader
+
+_SOUP = Recipe(id=uuid4(), title="Lentil soup", servings=8)
+
+
+async def test_counts_the_days_of_the_stored_recipe() -> None:
+    assert await CountDaysFed(FakeRecipeReader(_SOUP))(_SOUP.id, family_size=4) == 2
+
+
+async def test_an_unknown_recipe_is_not_found() -> None:
+    with pytest.raises(RecipeNotFoundError):
+        await CountDaysFed(FakeRecipeReader())(_SOUP.id, family_size=4)
+
+
+async def test_a_family_of_nobody_is_rejected() -> None:
+    with pytest.raises(InvalidFamilySizeError):
+        await CountDaysFed(FakeRecipeReader(_SOUP))(_SOUP.id, family_size=0)
+
+
+async def test_it_is_traced_with_recipe_family_and_result(
+    span_exporter: InMemorySpanExporter,
+) -> None:
+    await CountDaysFed(FakeRecipeReader(_SOUP))(_SOUP.id, family_size=4)
+
+    [span] = span_exporter.get_finished_spans()
+    assert span.name == "recipe.count_days_fed"
+    assert dict(span.attributes or {}) == {
+        "recipe.id": str(_SOUP.id),
+        "family.size": 4,
+        "recipe.days_fed": 2,
+    }
+```
+
+Next in this example: `add-external-client` reads the recipe from meal-recipes and wires
+`CountDaysFed` into a provider; `add-endpoint` serves it over HTTP.
