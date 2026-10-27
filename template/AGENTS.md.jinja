@@ -4,9 +4,10 @@
 batch-cooking menu from a recipe catalog, recipes are imported by URL, and a shopping list
 is built from the accepted plan.
 
-This file is for coding agents (Claude Code, Codex, Cursor, ...) and humans alike.
-Cross-service rules, contracts and ADRs live in the **meal-platform** repository;
-read its `AGENTS.md` before changing anything that crosses a service boundary.
+This file is for coding agents (Claude Code, Codex, Cursor, ...) and humans alike: hard
+rules here, details in `docs/`. Cross-service rules, contracts and ADRs live in the
+**meal-platform** repository; read its `AGENTS.md` before changing anything that crosses a
+service boundary.
 
 ## Commands
 
@@ -35,54 +36,80 @@ use `uv add <pkg>` (or `uv add --dev`) so `uv.lock` stays the source of truth.
 src/{{ package_name }}/
   domain/          entities, value objects, domain errors, ports (typing.Protocol)
   application/     use cases: one module per use case, depends on domain only
-  infrastructure/  adapters implementing ports: DB, HTTP clients, LLM
+  infrastructure/  adapters implementing ports: HTTP clients, LLM
 {%- if with_database %}
     db/            engine, sessions, ORM `Base` (models.py), repositories, migrations/
 {%- endif %}
 {%- if with_cache %}
     cache/         `ValkeyCache` (TTL on every write, Valkey down = miss); feature caches wrap it
 {%- endif %}
-  api/             FastAPI routers and request/response schemas
+  api/             routers, request/response schemas, providers (dependencies.py), errors.py
   observability/   logging, tracing, metrics (do not bypass)
   settings.py      pydantic-settings, env vars only
-  main.py          composition root: create_app() wires everything together
-tests/             mirrors src/; unit tests for domain/application, API tests via TestClient
+  main.py          composition root: create_app() and the lifespan
+tests/             mirrors src/; fixtures in tests/conftest.py, shared fakes in tests/fakes/
+docs/              architecture, stack and conventions (see Docs below)
 ```
 
-Dependency direction: `api → application → domain ← infrastructure`.
+Dependency direction: `api → application → domain ← infrastructure`, checked by `make imports`.
 
 - `domain` imports nothing from FastAPI, SQLAlchemy, httpx2, Redis, Ollama, `observability`
   or `settings`.
 - `application` talks to the outside world only through ports defined in `domain`.
-- Wiring (which adapter implements which port) happens in `main.py` / FastAPI dependencies.
+- Wiring (which adapter implements which port) happens in `main.py` and the providers in
+  `api/dependencies.py`. Routes get everything through typed dependencies (`SettingsDep`,
+  `HttpClientDep`{% if with_database %}, `DbSessionDep`{% endif %}{% if with_cache %}, `CacheDep`{% endif %}, a use case's own alias).
 {%- if with_database %}
-- Database access goes through repositories in `infrastructure/db/` that take the request's
-  `DbSessionDep` session: one transaction per request, committed when the route returns and
-  rolled back when it raises. Repositories never commit. Tables change only via migrations.
-- Migrations run as a one-off job before the new version starts, while the old one still
-  serves: they must work with both (add first; drop or rename in a later release).
+- Database: repositories in `infrastructure/db/` on the request's `DbSessionDep` session (one
+  transaction per request); they never commit. Tables change only via migrations, which
+  must work with the release still running (add first; drop or rename in a later release).
+{%- endif %}
+{%- if with_cache %}
+- The cache is never the source of truth: cache-aside through a feature port, a TTL on
+  every write, no personal data in keys.
 {%- endif %}
 - The LLM is just another port (`domain`) with an Ollama adapter (`infrastructure`).
   LLM output is always parsed into a Pydantic model; never pass raw LLM text into the domain.
 
-## Code style
+## Where does new code go?
+
+| I need to... | Put it in |
+|---|---|
+| a new business concept or rule | `domain/<feature>/`: entity or value object (frozen dataclass) |
+| talk to something external | port in `domain/<feature>/ports.py`, adapter in `infrastructure/` |
+| a new operation the service performs | `application/<feature>/<verb>_<noun>.py`, one use case class |
+| a new HTTP endpoint | `api/<feature>.py` (router + schemas), provider in `api/dependencies.py`, `include_router` in `main.py` |
+| a new config value | `settings.py` (a sub-model per adapter) + `.env.example` |
+| a client, pool or other resource with a lifetime | opened in `lifespan` (`main.py`), field on `AppState`, provider in `api/dependencies.py` |
+{%- if with_database %}
+| a DB table | `infrastructure/db/models.py` + `make migration name=...` |
+| a repository | `infrastructure/db/<feature>.py`, implementing ports from `domain/<feature>/ports.py` |
+{%- endif %}
+{%- if with_cache %}
+| cache a slow lookup | port in `domain/<feature>/ports.py`, adapter wrapping `ValkeyCache` in `infrastructure/cache/<feature>.py` |
+{%- endif %}
+| a fake for tests | `tests/fakes/<feature>.py` |
+
+## Code rules
 
 - Python {{ python_version }}, full type hints, pyright strict must pass. No `Any` in signatures
   of domain or application code; no `# type: ignore` without an error code and a reason.
-- Pydantic models at the boundaries (API, LLM output, settings);
-  plain dataclasses (frozen) inside the domain are fine.
+- Pydantic models at the boundaries (API, LLM output, other services' payloads, settings);
+  frozen dataclasses inside the domain. API schemas subclass `ApiModel`.
 - Async all the way for I/O. No blocking calls (`requests`, `time.sleep`) in async code.
-- Small functions, explicit names, no clever metaprogramming. Comments explain *why*.
-- Errors: domain raises domain exceptions; `api` maps them to HTTP status codes.
+- Errors: domain and application raise the classes in `domain/errors.py` (or subclasses).
+  The central handlers in `api/errors.py` turn them into problem-details responses; routes
+  never catch them to map them and never raise `HTTPException` for them. Adapters convert
+  library exceptions into domain errors. Log an error once, where it is handled.
+- Settings: `get_settings()` only in the composition root; components get their slice;
+  secrets are `SecretStr`.
 
-## Observability (non-negotiable)
-
-Quality of logs, traces and metrics is a primary goal of this project.
+## Observability (non-negotiable: a primary goal of this project)
 
 - Logging: `from {{ package_name }}.observability import get_logger`;
-  `logger = get_logger(__name__)`. Never `print`, never `logging.getLogger` (ruff bans it).
+  `_logger = get_logger(__name__)`. Never `print`, never `logging.getLogger` (ruff bans it).
 - Log events are dotted snake_case names with key-value context, not prose:
-  `logger.info("recipe.imported", recipe_id=..., source="json-ld")`. No f-strings in messages.
+  `_logger.info("recipe.imported", recipe_id=..., source="json-ld")`. No f-strings in messages.
 - Never log secrets, tokens or full LLM prompts with personal data.
 - Incoming HTTP and outgoing httpx2 calls are traced automatically. Add a manual span for every
   use case and every LLM call: `with get_tracer(__name__).start_as_current_span("plan.generate"):`.
@@ -94,25 +121,27 @@ Quality of logs, traces and metrics is a primary goal of this project.
 
 ## Testing
 
-- pytest, `asyncio_mode = auto`. Arrange / act / assert, one behavior per test.
-- Domain and application: fast unit tests with fakes for ports, no network.
-- API: `TestClient` via the `client` fixture. Observability can be asserted with the
-  `span_exporter` and `log_exporter` fixtures (see `tests/test_observability.py`).
+- Test the requirement, not the implementation: happy path, edge cases, failures and
+  invariants. If a requirement is unclear, stop and ask. Coverage finds gaps; it is not the goal.
+- Domain and application: fast unit tests with in-memory fakes for ports, no network.
+- API: the `client` fixture (`TestClient`) with providers overridden by fakes.
 {%- if with_database %}
-- Database: integration tests are marked `@pytest.mark.integration` and run against
-  PostgreSQL in a testcontainer (one per session, migrated once). Use the `db_session`
-  fixture for repositories (rolled back after each test) and `db_client` for HTTP tests
-  that touch the database. They need Docker; `make check` and CI run them.
+- Database: `@pytest.mark.integration` tests against PostgreSQL in a testcontainer;
+  `db_session` for repositories, `db_client` (not `TestClient`, which runs the app in
+  another event loop than the test's asyncpg connections) for HTTP tests.
 {%- endif %}
+{%- if with_cache %}
+- Cache: adapter tests against Valkey in a testcontainer (`cache_settings`, `cache_client`),
+  marked `integration`; never hand an async fixture's client to an app under `TestClient`.
+{%- endif %}
+- Observability is asserted with the `span_exporter`, `log_exporter` and `metric_reader` fixtures.
 - Warnings are errors in tests. Fix the cause instead of filtering it.
 - Every bug fix starts with a failing test.
 
-## Contracts
-
-- HTTP API: FastAPI generates OpenAPI; the copy in meal-platform `contracts/openapi/` is
-  updated in the same change when the API changes.
-
 ## Boundaries for agents
+
+- Contracts: when the HTTP API changes, update its OpenAPI copy in meal-platform
+  `contracts/openapi/` in the same change.
 
 - Ask before: adding a new runtime dependency, changing a contract, changing CI or Dockerfile,
   touching anything in `observability/` beyond adding helpers.
@@ -121,7 +150,23 @@ Quality of logs, traces and metrics is a primary goal of this project.
 - Files that come from meal-service-template (CI, Dockerfile, observability, tooling config)
   should be improved in the template and pulled with `make update-template`.
 
-## Skills
+## Docs
 
-Task recipes live in `.claude/skills/`: `add-endpoint`, `verify-observability`.
-Use them when the task matches.
+Read the one that matches the task before writing code:
+
+- [docs/architecture.md](docs/architecture.md): layers, composition root, how dependencies reach routes, readiness
+- [docs/stack.md](docs/stack.md): approved and banned libraries
+- [docs/conventions/python.md](docs/conventions/python.md): typing, SOLID as rules, anti-patterns, naming
+- [docs/conventions/models.md](docs/conventions/models.md): API schemas vs domain models, mapping
+- [docs/conventions/settings.md](docs/conventions/settings.md): settings structure, secrets, adding a setting
+- [docs/conventions/errors.md](docs/conventions/errors.md): error hierarchy, HTTP mapping, adapters
+{%- if with_database %}
+- [docs/conventions/persistence.md](docs/conventions/persistence.md): SQLAlchemy, repositories, transactions, migrations
+{%- endif %}
+{%- if with_cache %}
+- [docs/conventions/caching.md](docs/conventions/caching.md): cache-aside, keys, TTLs, failures, hit ratio
+{%- endif %}
+- [docs/conventions/testing.md](docs/conventions/testing.md): test philosophy, fixtures, fakes, integration tests
+
+Task recipes (skills) in `.claude/skills/`, for when the task matches: `add-endpoint`,
+`verify-observability`.

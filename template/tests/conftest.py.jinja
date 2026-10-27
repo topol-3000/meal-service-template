@@ -9,10 +9,12 @@ from alembic.config import Config
 {%- endif %}
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from opentelemetry import trace
+from opentelemetry import metrics, trace
 from opentelemetry._logs import set_logger_provider
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
+from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider
+from opentelemetry.sdk.metrics.export import AggregationTemporality, InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -53,6 +55,15 @@ trace.set_tracer_provider(_tracer_provider)
 _logger_provider = LoggerProvider()
 _logger_provider.add_log_record_processor(SimpleLogRecordProcessor(_LOGS))
 set_logger_provider(_logger_provider)
+
+# Delta: each read returns only what was recorded since the previous read.
+_METRICS = InMemoryMetricReader(
+    preferred_temporality={
+        Counter: AggregationTemporality.DELTA,
+        Histogram: AggregationTemporality.DELTA,
+    }
+)
+metrics.set_meter_provider(MeterProvider(metric_readers=[_METRICS]))
 
 
 {%- if with_database %}
@@ -103,6 +114,13 @@ def log_exporter() -> Iterator[InMemoryLogRecordExporter]:
     _LOGS.clear()
     yield _LOGS
     _LOGS.clear()
+
+
+@pytest.fixture
+def metric_reader() -> InMemoryMetricReader:
+    """`get_metrics_data()` returns what was recorded since the test started (or the last read)."""
+    _METRICS.get_metrics_data()
+    return _METRICS
 
 
 @pytest.fixture

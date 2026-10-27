@@ -1,0 +1,267 @@
+# Testing
+
+## Test philosophy (hard rule)
+
+Tests verify that the code does what the requirements require: its contract, its edge
+cases, its error and failure paths, and its documented invariants. Not merely that it does
+what it currently does. A test that restates the implementation (asserts that a function
+returns what it returns) is not acceptable as the only coverage of a behaviour.
+
+- For every behaviour, cover the happy path, the boundaries and edge cases, the error and
+  failure paths, and the invariants.
+- If a requirement, goal or expected behaviour is unclear or unspecified, **stop and ask**
+  before writing tests. Never invent assertions to make something pass or to raise
+  coverage.
+- Coverage is a gap-finder, not the goal. 100 % line coverage with only happy-path
+  assertions is a failure: code can be fully line-covered and still broken on every path
+  nobody asserted.
+- Every bug fix starts with a test that fails because of the bug.
+
+## Layout
+
+- `tests/` mirrors `src/{{ package_name }}/`: `application/plans/upcoming_plan_days.py` is
+  tested in `tests/application/plans/test_upcoming_plan_days.py`. Every test directory has
+  an `__init__.py`.
+- Shared fakes of domain ports live in `tests/fakes/<feature>.py`. Fixtures shared by many
+  modules live in `tests/conftest.py`; a fixture used by one module stays in that module.
+- Test names say the behaviour: `test_a_plan_runs_across_the_end_of_a_year`, not
+  `test_plan_days_2`. Arrange, act, assert; one behaviour per test.
+
+| What | How | Speed |
+|---|---|---|
+| domain rules | plain unit tests | fast |
+| use cases | unit tests with fakes for every port | fast |
+| HTTP adapters | `httpx2.MockTransport`, no network (see [errors.md](errors.md#adapters-convert-library-errors)) | fast |
+| routes | the `client` fixture (`TestClient`), providers overridden with fakes | fast |
+{%- if with_database %}
+| repositories, routes that use the database | real PostgreSQL in a testcontainer, `@pytest.mark.integration` | Docker |
+{%- endif %}
+{%- if with_cache %}
+| cache adapters | real Valkey in a testcontainer, `@pytest.mark.integration` | Docker |
+{%- endif %}
+
+## Fakes over mocks
+
+- A port gets an in-memory fake: a small class with the port's methods that keeps its data
+  in a dict and honours the port's contract (raises the documented errors, keeps order).
+  Tests then assert on outcomes (what the fake holds, what the use case returned), not on
+  which calls were made.
+- `unittest.mock` / `monkeypatch` only for things without a port: a library function at the
+  edge, like `uvicorn.run` in `tests/test_cli.py`.
+- Routes are tested with a fake behind the provider:
+  `app.dependency_overrides[get_upcoming_plan_days] = lambda: UpcomingPlanDays(FakeClock(...))`.
+
+## pytest conventions
+
+- `asyncio_mode = "auto"`: async tests and fixtures need no marker.
+- `filterwarnings = ["error"]`: a warning fails the test. Fix the cause, don't filter it.
+- Edge cases as tables: `@pytest.mark.parametrize` with `ids=` when the values don't speak
+  for themselves.
+- Errors with `pytest.raises(SomeError, match=r"...")`: the type and the message.
+- No fixed sleeps to wait for something. Poll with a deadline when a test must wait for
+  another process{% if with_cache %} (as `test_lifespan_closes_its_connections_on_shutdown` does){% endif %}.
+
+## Fixtures
+
+From `tests/conftest.py`:
+
+| Fixture | Gives |
+|---|---|
+| `settings` | `Settings` for tests: `environment="test"`, JSON logs, telemetry off{% if with_database %}, the database at a closed port (`UNIT_TEST_DATABASE_URL`){% endif %}{% if with_cache %}, Valkey at a closed port (`UNIT_TEST_CACHE_URL`), so unit tests see a cache that is down{% endif %} |
+| `app` | `create_app(settings)` |
+| `client` | `TestClient(app)`, lifespan included |
+| `span_exporter` | finished spans (`InMemorySpanExporter`), emptied before and after the test |
+| `log_exporter` | log records exported to OpenTelemetry (`InMemoryLogRecordExporter`) |
+| `metric_reader` | metrics recorded since the test started (`InMemoryMetricReader`, delta temporality) |
+{%- if with_database %}
+| `database_url` | one PostgreSQL container per session (`POSTGRES_IMAGE`), migrated to head once |
+| `db_settings` | `settings` pointed at that database |
+| `db_connection` | a connection in a transaction that is rolled back after the test |
+| `db_session_factory` | sessions on `db_connection`; their commits only release a savepoint |
+| `db_session` | one such session, for repository tests |
+| `db_app` / `db_client` | the app on the test database, and an `httpx2.AsyncClient` serving it in the test's event loop |
+| `alembic_config` | Alembic pointed at the test database |
+{%- endif %}
+{%- if with_cache %}
+| `cache_url` | one Valkey container per session (`VALKEY_IMAGE`) |
+| `cache_client` | the test's own redis-py client, to look at Valkey directly; empties Valkey after the test |
+| `cache_settings` | `settings` pointed at that Valkey (and, through `cache_client`, emptied after the test) |
+{%- endif %}
+
+Logs go to stdout as JSON: to assert on them, call `configure_logging(settings)` inside the
+test and read `capsys` (as `tests/test_observability.py` does). Spans and metrics come from
+the fixtures above:
+
+```python
+from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
+
+
+def test_an_unknown_route_is_traced_as_404(
+    client: TestClient, span_exporter: InMemorySpanExporter
+) -> None:
+    client.get("/no-such-route")
+
+    [server] = [s for s in span_exporter.get_finished_spans() if s.kind == SpanKind.SERVER]
+    assert (server.attributes or {})["http.response.status_code"] == 404
+```
+{%- if with_database or with_cache %}
+
+## Integration tests
+
+Tests that need Docker are marked `@pytest.mark.integration` (`pytestmark` for a whole
+module). `make test` and CI run them; `make test-unit` skips them. The containers are
+session-scoped, so the first integration test pays for the start-up.
+{%- if with_database %}
+
+**Database.** The container is migrated once; every test runs in a transaction that is
+rolled back, so tests don't see each other's data. Use `db_session` or
+`db_session_factory` for repositories, and `db_client` for HTTP tests that touch the
+database, never `TestClient`: `TestClient` runs the app in an event loop of its own, and
+asyncpg connections are bound to the loop that opened them, so the app could not use the
+test's `db_connection`. `db_client` runs the app's lifespan and requests in the test's
+loop. To make requests write inside the test's transaction, override `get_app_state` with
+`db_session_factory` (see [persistence.md](persistence.md#example-a-recipes-table)).
+`tests/infrastructure/db/test_migrations.py` checks that the models match the migrations
+and that every migration downgrades.
+{%- endif %}
+{%- if with_cache %}
+
+**Cache.** Test cache adapters against Valkey through `cache_settings` (each test builds
+its own client from it, as `tests/infrastructure/cache/test_valkey.py` does);
+`cache_client` empties Valkey after each test. The objects of async fixtures belong to the
+test's event loop, like asyncpg connections: never hand `cache_client` to an app served by
+`TestClient`. An app built with `create_app(cache_settings)` opens its own client, so
+`TestClient` is fine there. Everything above the cache adapter is tested with an in-memory
+fake of the feature's cache port (see [caching.md](caching.md#example-caching-recipe-lookups)).
+Valkey being down needs no container: the `settings` fixture already points the cache at
+a closed port.
+{%- endif %}
+{%- endif %}
+
+## Example: tests for a use case
+
+Tests for the `plans` feature from [architecture.md](../architecture.md#how-dependencies-reach-routes).
+The fake:
+
+```python
+# tests/fakes/clock.py
+from datetime import date
+
+
+class FakeClock:
+    """`Clock` stopped on one day."""
+
+    def __init__(self, today: date) -> None:
+        self.day = today
+
+    def today(self) -> date:
+        return self.day
+```
+
+The domain rule: both limits, both sides of each, and a plan across the end of a year.
+
+```python
+# tests/domain/plans/test_plan.py
+from datetime import date
+from itertools import pairwise
+
+import pytest
+
+from {{ package_name }}.domain.plans.plan import PlanLengthError, plan_days
+
+
+@pytest.mark.parametrize("days", [3, 7])
+def test_a_plan_covers_consecutive_days_from_the_first(days: int) -> None:
+    dates = plan_days(date(2026, 3, 30), days)
+
+    assert len(dates) == days
+    assert dates[0] == date(2026, 3, 30)
+    assert all((later - earlier).days == 1 for earlier, later in pairwise(dates))
+
+
+def test_a_plan_runs_across_the_end_of_a_year() -> None:
+    assert plan_days(date(2026, 12, 30), 3) == [
+        date(2026, 12, 30),
+        date(2026, 12, 31),
+        date(2027, 1, 1),
+    ]
+
+
+@pytest.mark.parametrize("days", [-1, 0, 2, 8])
+def test_a_plan_shorter_than_3_or_longer_than_7_days_is_rejected(days: int) -> None:
+    with pytest.raises(PlanLengthError, match=rf"not {days}$"):
+        plan_days(date(2026, 3, 30), days)
+```
+
+The use case, with the fake clock, and its span:
+
+```python
+# tests/application/plans/test_upcoming_plan_days.py
+from datetime import date
+
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+from {{ package_name }}.application.plans.upcoming_plan_days import UpcomingPlanDays
+from tests.fakes.clock import FakeClock
+
+
+def test_the_next_plan_starts_tomorrow() -> None:
+    upcoming = UpcomingPlanDays(FakeClock(date(2026, 2, 28)))
+
+    assert upcoming(3) == [date(2026, 3, 1), date(2026, 3, 2), date(2026, 3, 3)]
+
+
+def test_it_is_traced_with_the_plan_length(span_exporter: InMemorySpanExporter) -> None:
+    UpcomingPlanDays(FakeClock(date(2026, 2, 28)))(5)
+
+    [span] = span_exporter.get_finished_spans()
+    assert span.name == "plan.upcoming_days"
+    assert (span.attributes or {})["plan.days"] == 5
+```
+
+The route, with the provider overridden, including the error response:
+
+```python
+# tests/api/test_plans.py
+from datetime import date
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from {{ package_name }}.api.dependencies import get_upcoming_plan_days
+from {{ package_name }}.application.plans.upcoming_plan_days import UpcomingPlanDays
+from tests.fakes.clock import FakeClock
+
+
+@pytest.fixture
+def app(app: FastAPI) -> FastAPI:
+    """The app with the clock stopped on 2026-02-28."""
+    app.dependency_overrides[get_upcoming_plan_days] = lambda: UpcomingPlanDays(
+        FakeClock(date(2026, 2, 28))
+    )
+    return app
+
+
+def test_returns_the_days_of_the_next_plan(client: TestClient) -> None:
+    response = client.get("/plans/upcoming-days", params={"days": 3})
+
+    assert response.status_code == 200
+    assert response.json() == {"days": ["2026-03-01", "2026-03-02", "2026-03-03"]}
+
+
+def test_a_week_is_the_default(client: TestClient) -> None:
+    response = client.get("/plans/upcoming-days")
+
+    assert len(response.json()["days"]) == 7
+
+
+def test_a_length_out_of_range_is_a_422_problem(client: TestClient) -> None:
+    response = client.get("/plans/upcoming-days", params={"days": 8})
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["detail"] == "A plan covers 3 to 7 days, not 8"
+```

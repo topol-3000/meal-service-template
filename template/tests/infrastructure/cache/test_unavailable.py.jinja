@@ -12,6 +12,7 @@ import httpx2
 {% endif -%}
 import pytest
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 from pydantic import SecretStr
 
 from {{ package_name }}.api.dependencies import CacheDep
@@ -24,6 +25,20 @@ from {{ package_name }}.settings import CacheSettings, Settings
 def _unavailable_logs(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     return [line for line in lines if line["event"] == "cache.unavailable"]
+
+
+def _lookups(metric_reader: InMemoryMetricReader) -> dict[str, int | float]:
+    """`cache.lookups` recorded since the last read, by `result`."""
+    data = metric_reader.get_metrics_data()
+    return {
+        str(point.attributes["result"]): point.value
+        for resource in (data.resource_metrics if data else ())
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "cache.lookups"
+        for point in metric.data.data_points
+        if isinstance(point, NumberDataPoint) and point.attributes
+    }
 
 
 async def test_each_call_is_a_miss_or_a_no_op_logged_once(
@@ -43,6 +58,20 @@ async def test_each_call_is_a_miss_or_a_no_op_logged_once(
     assert [log["operation"] for log in logs] == ["get", "set", "delete"]
     assert all(log["level"] == "warning" for log in logs)
     assert all(log["error_type"] == "ConnectionError" for log in logs)
+
+
+async def test_a_lookup_while_valkey_is_down_counts_as_unavailable(
+    settings: Settings, metric_reader: InMemoryMetricReader
+) -> None:
+    client = create_cache_client(settings.cache)
+    cache = ValkeyCache(client, default_ttl_seconds=60)
+
+    await cache.get("sample:1")
+    await cache.set("sample:1", b"soup")  # writes and deletes are not lookups
+    await cache.delete("sample:1")
+    await client.aclose()
+
+    assert _lookups(metric_reader) == {"unavailable": 1}
 
 
 async def test_a_cache_that_does_not_answer_is_a_miss_after_the_timeout(
