@@ -26,8 +26,9 @@ observability section of `AGENTS.md`.
 3. **The class.** `application/<feature>/<verb>_<noun>.py`, the class named after the file
    ([naming](../../../docs/conventions/python.md#naming-and-files)). `__init__` takes the
    ports, typed as the Protocols, never as adapters; `__call__` is the operation.
-4. **Span and logs.** Wrap the body in `_tracer.start_as_current_span("<feature>.<verb>")`
-   and put ids and results on the span as attributes. Log an event for what the operation
+4. **Span and logs.** Wrap the body in `_tracer.start_as_current_span("<entity>.<verb>")`:
+   the entity singular, like `recipe.count_days_fed` and `plan.generate`. Put ids and
+   results on the span as attributes. Log an event for what the operation
    changed (`recipe.imported`, ids as keys). Errors propagate: no try/except to log or map
    them ([errors.md](../../../docs/conventions/errors.md#catching)).
 5. **Fakes.** An in-memory fake per port in `tests/fakes/<feature>.py` that raises what the

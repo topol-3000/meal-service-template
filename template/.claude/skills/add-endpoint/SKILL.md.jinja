@@ -64,7 +64,7 @@ class DaysFedResponse(ApiModel):
 
 
 @router.get("/{recipe_id}/days-fed")
-async def days_fed(
+async def get_days_fed(
     recipe_id: UUID,
     family_size: Annotated[int, Query(ge=1)],
     count_days_fed: CountDaysFedDep,

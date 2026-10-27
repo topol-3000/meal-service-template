@@ -78,10 +78,12 @@ async def test_while_valkey_is_down_recipes_come_from_meal_recipes(settings: Set
         return httpx2.Response(200, json={"id": str(_SOUP.id), "title": _SOUP.title, "servings": 4})
 
     cache_client = create_cache_client(settings.cache)
-    cache = ValkeyCache(cache_client, default_ttl_seconds=60)
-    async with httpx2.AsyncClient(transport=httpx2.MockTransport(recipes_api)) as http_client:
-        find_recipe = get_find_recipe(http_client, settings, cache)
+    try:
+        cache = ValkeyCache(cache_client, default_ttl_seconds=60)
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(recipes_api)) as http_client:
+            find_recipe = get_find_recipe(http_client, settings, cache)
 
-        assert await find_recipe(_SOUP.id) == _SOUP
-    await cache_client.aclose()
+            assert await find_recipe(_SOUP.id) == _SOUP
+    finally:
+        await cache_client.aclose()
 ```
