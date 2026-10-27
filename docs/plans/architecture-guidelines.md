@@ -159,8 +159,11 @@ docs/
   - [ ] SQLAlchemy 2.0 typed style only: `DeclarativeBase`, `Mapped[...]`, `mapped_column`, `select()`.
         No legacy `Query` API, no raw SQL string interpolation.
   - [ ] Alembic: autogenerate, then review by hand; one migration per change; naming convention for constraints.
+        How to write a migration, step by step.
   - [ ] Deployment (D11): `python -m <package> migrate` as a one-off job; expand/contract,
         so every migration works with the release that is still running.
+  - [ ] `op.get_context().autocommit_block()` (e.g. `CREATE INDEX CONCURRENTLY`) commits the
+        migration transaction mid-run, which also releases the advisory lock (`pg_advisory_xact_lock`).
   - [ ] N+1 guidance: explicit `selectinload` and no lazy loading in async (`lazy="raise"`).
 
 - [ ] **1.7a `docs/conventions/caching.md`**, rendered only when `with_cache` (D10);
@@ -176,7 +179,12 @@ docs/
   - [ ] Failures: connection errors and timeouts become a miss, logged once as
         `cache.unavailable`; the request still succeeds. Invalidate by deleting the key
         after the source of truth changes.
-  - [ ] No secrets or personal data in keys (keys show up in span attributes).
+  - [ ] No secrets or personal data in keys. The redis instrumentation records commands
+        without arguments (`GET ?`), so keys stay out of spans, but they show up in logs and in
+        Valkey tooling (`MONITOR`, slowlog).
+  - [ ] A failed delete (Valkey down) leaves the old value until it expires: the TTL is the
+        staleness bound.
+  - [ ] Hit ratio from the `cache.lookups` counter (3.16).
 
 - [ ] **1.8 `docs/conventions/testing.md`.**
   - [ ] Port the boilerplate's **test philosophy hard rule**: test the requirement, not the
@@ -311,6 +319,9 @@ Infrastructure only, no business logic. Each file comes with a test.
       the Valkey-down tests (miss + `cache.unavailable` per call, requests via `CacheDep`,
       `/health/ready` without a cache check, a silent server = miss within the timeout) need no
       Docker. The lifespan test checks Valkey's `CLIENT LIST` for the app's connection.
+- [ ] **3.16** (`with_cache`) `cache.lookups` counter in `ValkeyCache.get` (`get_meter`), attribute
+      `result` = `hit` | `miss` | `unavailable`, for the hit ratio (1.7a). Tests read it through
+      an in-memory metric reader.
 
 ## Phase 4: Port useful parts of the boilerplate
 
@@ -377,12 +388,29 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
       (new dev dependency, `make check` now includes imports, new settings layout,
       `inject_trace_context`/`extract_trace_context` and `add-event-handler` removed).
 - [ ] **8.3** Record the decisions D1–D14 as ADRs in meal-platform `docs/adr/`.
-- [ ] **8.4** meal-platform compose (D11, D12, D13): `postgres:18-alpine` service on
+- [ ] **8.4** Done before Phase 5 (F3). meal-platform compose (D11, D12, D13): `postgres:18-alpine` service on
       `localhost:5432` with a volume; an idempotent way to add a database and user per
       service (e.g. `make db-add name=meal-recipes`); the `<service>-migrate` one-off
       service pattern for each service that has a database, with the same environment as the
       service (shared `env_file`, D11); a `valkey/valkey:9` service on
       `localhost:6379` for services with `with_cache` (D10).
+
+## Follow-ups
+
+Open items that wait on something outside the chunks above.
+
+- [ ] **F1** Lift the SQLAlchemy `<2.1` cap in `pyproject.toml.jinja` with the next
+      `opentelemetry-instrumentation-sqlalchemy` release (2.1 support was merged upstream in
+      PR 5120 on 2026-10-14; 0.66b1 refuses 2.1). Raise that package's lower bound to the
+      release, drop the comment, and run `make check` on SQLAlchemy 2.1 in the `with_database` renders.
+- [ ] **F2** `POSTGRES_IMAGE` (`postgres:18-alpine`) and `VALKEY_IMAGE` (`valkey/valkey:9`) in
+      `tests/conftest.py.jinja` must match the images in meal-platform compose (D13, D10).
+      meal-platform has no compose file yet; compare when 8.4 lands and on every image bump in either repo.
+- [ ] **F3** `make migration` autogenerates against `DB__URL`, so it needs a running
+      PostgreSQL, which locally is meal-platform compose (8.4).
+      Decided 2026-10-27: do 8.4 first, before Phase 5 (`add-repository` runs `make migration`);
+      `make migration` keeps autogenerating against `DB__URL`. Not chosen: autogenerate
+      against a throwaway testcontainer migrated to head.
 
 ## Progress log
 
