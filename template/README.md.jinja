@@ -16,6 +16,11 @@ make migrate      # needs PostgreSQL at DB__URL (.env)
 make run          # http://localhost:{{ http_port }}/docs
 ```
 
+{% if with_cache -%}
+The Valkey cache (`CACHE__URL`) is optional at runtime: while it is down the service keeps
+serving and every lookup is a miss.
+
+{% endif -%}
 Start [meal-platform](https://github.com/{{ github_owner }}/meal-platform) first to get traces,
 logs and metrics in Grafana at http://localhost:3000.
 

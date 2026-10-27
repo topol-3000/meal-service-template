@@ -1,1 +1,1 @@
-"""Adapters that implement domain ports: database, Redis Streams, HTTP clients, LLM."""
+"""Adapters that implement domain ports: database, HTTP clients, LLM."""

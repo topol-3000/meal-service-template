@@ -65,22 +65,22 @@ def test_ready_without_checks_is_ok(app: FastAPI, client: TestClient) -> None:
 
 
 def test_ready_is_ok_when_every_check_passes(app: FastAPI, client: TestClient) -> None:
-    _use_readiness_checks(app, {"database": _ok, "cache": _ok})
+    _use_readiness_checks(app, {"database": _ok, "storage": _ok})
 
     response = client.get("/health/ready")
 
     assert response.status_code == 200
-    assert response.json()["checks"] == {"database": "ok", "cache": "ok"}
+    assert response.json()["checks"] == {"database": "ok", "storage": "ok"}
 
 
 def test_ready_is_unavailable_when_a_check_fails(app: FastAPI, client: TestClient) -> None:
-    _use_readiness_checks(app, {"database": _unreachable, "cache": _ok})
+    _use_readiness_checks(app, {"database": _unreachable, "storage": _ok})
 
     response = client.get("/health/ready")
 
     assert response.status_code == 503
     assert response.json()["status"] == "unavailable"
-    assert response.json()["checks"] == {"database": "failed", "cache": "ok"}
+    assert response.json()["checks"] == {"database": "failed", "storage": "ok"}
 
 
 def test_ready_runs_checks_concurrently(app: FastAPI, client: TestClient) -> None:
@@ -93,12 +93,12 @@ def test_ready_runs_checks_concurrently(app: FastAPI, client: TestClient) -> Non
 
 
 def test_ready_counts_a_check_over_the_timeout_as_failed(app: FastAPI, client: TestClient) -> None:
-    _use_readiness_checks(app, {"database": _hangs, "cache": _ok}, timeout_seconds=0.05)
+    _use_readiness_checks(app, {"database": _hangs, "storage": _ok}, timeout_seconds=0.05)
 
     response = client.get("/health/ready")
 
     assert response.status_code == 503
-    assert response.json()["checks"] == {"database": "failed", "cache": "ok"}
+    assert response.json()["checks"] == {"database": "failed", "storage": "ok"}
 {%- if with_database %}
 
 

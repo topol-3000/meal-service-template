@@ -1,14 +1,12 @@
+from collections.abc import {% if with_database or with_cache %}AsyncIterator, {% endif %}Iterator
+
 {% if with_database -%}
-from collections.abc import AsyncIterator, Iterator
-
 import httpx2
-import pytest
-from alembic.config import Config
-{% else -%}
-from collections.abc import Iterator
-
-import pytest
 {% endif -%}
+import pytest
+{%- if with_database %}
+from alembic.config import Config
+{%- endif %}
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry import trace
@@ -18,19 +16,30 @@ from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogR
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-{%- if with_database %}
+{%- if with_database or with_cache %}
 from pydantic import SecretStr
+{%- endif %}
+{%- if with_cache %}
+from redis.asyncio import Redis
+{%- endif %}
+{%- if with_database %}
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 from testcontainers.community.postgres import PostgresContainer
 {%- endif %}
+{%- if with_cache %}
+from testcontainers.community.valkey import ValkeyContainer
+{%- endif %}
 
+{% if with_cache -%}
+from {{ package_name }}.infrastructure.cache.valkey import create_cache_client
+{% endif -%}
 {% if with_database -%}
 from {{ package_name }}.infrastructure.db.engine import create_db_engine
 from {{ package_name }}.infrastructure.db.migrate import alembic_config as make_alembic_config
 from {{ package_name }}.infrastructure.db.migrate import upgrade_to_head
 {% endif -%}
 from {{ package_name }}.main import create_app
-from {{ package_name }}.settings import {% if with_database %}DatabaseSettings, {% endif %}Settings
+from {{ package_name }}.settings import {% if with_cache %}CacheSettings, {% endif %}{% if with_database %}DatabaseSettings, {% endif %}Settings
 
 # OTel global providers can be set only once per process: install in-memory ones
 # for the whole test session and clear them between tests.
@@ -53,17 +62,29 @@ POSTGRES_IMAGE = "postgres:18-alpine"
 # Nothing listens there: unit tests that reach the database fail at once instead of hanging.
 UNIT_TEST_DATABASE_URL = "postgresql+asyncpg://test:test@127.0.0.1:1/test"
 {%- endif %}
+{%- if with_cache %}
+
+# Keep in step with the Valkey image in meal-platform compose.
+VALKEY_IMAGE = "valkey/valkey:9"
+# Nothing listens there: unit tests run with Valkey down, where every lookup is a miss.
+UNIT_TEST_CACHE_URL = "redis://127.0.0.1:1/0"
+{%- endif %}
 
 
 @pytest.fixture
 def settings() -> Settings:
     # otel_enabled=False: keep the in-memory providers above instead of OTLP exporters.
-{%- if with_database %}
+{%- if with_database or with_cache %}
     return Settings(
         environment="test",
         log_format="json",
         otel_enabled=False,
+{%- if with_database %}
         db=DatabaseSettings(url=SecretStr(UNIT_TEST_DATABASE_URL)),
+{%- endif %}
+{%- if with_cache %}
+        cache=CacheSettings(url=SecretStr(UNIT_TEST_CACHE_URL)),
+{%- endif %}
     )
 {%- else %}
     return Settings(environment="test", log_format="json", otel_enabled=False)
@@ -171,4 +192,34 @@ async def db_client(db_app: FastAPI) -> AsyncIterator[httpx2.AsyncClient]:
         httpx2.AsyncClient(transport=transport, base_url="http://test") as client,
     ):
         yield client
+{%- endif %}
+{%- if with_cache %}
+
+
+# Integration tests (`@pytest.mark.integration`) against a real Valkey.
+
+
+@pytest.fixture(scope="session")
+def cache_url() -> Iterator[str]:
+    """One Valkey container for the test session."""
+    with ValkeyContainer(VALKEY_IMAGE) as valkey:
+        yield f"redis://{valkey.get_host()}:{valkey.get_exposed_port()}/0"
+
+
+@pytest.fixture
+async def cache_client(cache_url: str) -> AsyncIterator[Redis]:
+    """The test's own client, to look at Valkey directly. Empties the cache after the test."""
+    client = create_cache_client(CacheSettings(url=SecretStr(cache_url)))
+    try:
+        yield client
+    finally:
+        # redis-py leaves the `**kwargs` of server commands untyped.
+        await client.flushdb()  # pyright: ignore[reportUnknownMemberType]
+        await client.aclose()
+
+
+@pytest.fixture
+def cache_settings(settings: Settings, cache_url: str, cache_client: Redis) -> Settings:
+    """Settings on the test Valkey; through `cache_client`, it is emptied after each test."""
+    return settings.model_copy(update={"cache": CacheSettings(url=SecretStr(cache_url))})
 {%- endif %}

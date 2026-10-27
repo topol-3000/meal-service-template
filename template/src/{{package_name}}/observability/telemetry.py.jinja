@@ -9,6 +9,9 @@ from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExp
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPX2ClientInstrumentor
+{%- if with_cache %}
+from opentelemetry.instrumentation.redis import RedisInstrumentor
+{%- endif %}
 {%- if with_database %}
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 {%- endif %}
@@ -76,9 +79,15 @@ def setup_telemetry(settings: Settings) -> Telemetry:
     return Telemetry(tracer_provider, meter_provider, logger_provider)
 
 
-{% if with_database -%}
+{% if with_database or with_cache -%}
 def instrument_app(app: FastAPI) -> None:
+{%- if with_database and with_cache %}
+    """Auto-instrument incoming FastAPI requests, httpx2 calls, SQLAlchemy and Valkey commands."""
+{%- elif with_database %}
     """Auto-instrument incoming FastAPI requests, outgoing httpx2 calls and SQLAlchemy queries."""
+{%- else %}
+    """Auto-instrument incoming FastAPI requests, outgoing httpx2 calls and Valkey commands."""
+{%- endif %}
     # Stable HTTP and database semantic conventions: `http.server.request.duration` in seconds,
     # `http.request.method`, `db.system.name`, `db.query.text`, ... instead of the legacy names.
     # Read on first instrumentation.
@@ -99,6 +108,14 @@ def instrument_app(app: FastAPI) -> None:
     sqlalchemy_instrumentor = SQLAlchemyInstrumentor()
     if not sqlalchemy_instrumentor.is_instrumented_by_opentelemetry:
         sqlalchemy_instrumentor.instrument()
+{%- endif %}
+{%- if with_cache %}
+    # Patches redis-py's client classes, so the client created later in the lifespan is traced.
+    # Commands are recorded without their arguments (`GET ?`): keys and values stay out of spans.
+    redis_instrumentor = RedisInstrumentor()
+    if not redis_instrumentor.is_instrumented_by_opentelemetry:
+        # Its override of `instrument` leaves `**kwargs` untyped; none are passed.
+        redis_instrumentor.instrument()  # pyright: ignore[reportUnknownMemberType]
 {%- endif %}
 
 

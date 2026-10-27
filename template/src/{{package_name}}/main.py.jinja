@@ -9,6 +9,9 @@ from fastapi import FastAPI
 from {{ package_name }}.api import health
 from {{ package_name }}.api.dependencies import AppState
 from {{ package_name }}.api.errors import register_error_handlers
+{%- if with_cache %}
+from {{ package_name }}.infrastructure.cache.valkey import ValkeyCache, create_cache_client
+{%- endif %}
 {%- if with_database %}
 from {{ package_name }}.infrastructure.db.engine import (
     create_db_engine,
@@ -44,15 +47,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 {%- if with_database %}
             db_engine = create_db_engine(settings.db)
             stack.push_async_callback(db_engine.dispose)
+{%- endif %}
+{%- if with_cache %}
+            # Not pinged and not a readiness check: the cache is optional, its errors are misses.
+            cache_client = create_cache_client(settings.cache)
+            stack.push_async_callback(cache_client.aclose)
+{%- endif %}
             app.state.app_state = AppState(
                 settings=settings,
                 http_client=http_client,
+{%- if with_database %}
                 db_session_factory=create_session_factory(db_engine),
-                readiness_checks={"database": partial(ping, db_engine)},
-            )
-{%- else %}
-            app.state.app_state = AppState(settings=settings, http_client=http_client)
 {%- endif %}
+{%- if with_cache %}
+                cache=ValkeyCache(
+                    cache_client, default_ttl_seconds=settings.cache.default_ttl_seconds
+                ),
+{%- endif %}
+{%- if with_database %}
+                readiness_checks={"database": partial(ping, db_engine)},
+{%- endif %}
+            )
             logger.info("service.started", version=settings.service_version)
             yield
             logger.info("service.stopping")

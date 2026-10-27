@@ -24,7 +24,7 @@ typecheck: ## Pyright (strict)
 imports: ## Import-linter layer contracts
 	uv run lint-imports
 
-test: ## Pytest with coverage, `integration` tests included{% if with_database %} (need Docker){% endif %}
+test: ## Pytest with coverage, `integration` tests included{% if with_database or with_cache %} (need Docker){% endif %}
 	uv run pytest --cov --cov-report=term
 
 test-unit: ## Pytest without tests marked `integration`

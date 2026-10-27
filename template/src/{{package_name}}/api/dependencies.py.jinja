@@ -19,6 +19,9 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 {%- endif %}
 
+{% if with_cache -%}
+from {{ package_name }}.infrastructure.cache.valkey import ValkeyCache
+{% endif -%}
 from {{ package_name }}.settings import Settings
 
 # Raises when the resource is unavailable (e.g. a database ping).
@@ -33,6 +36,9 @@ class AppState:
     http_client: httpx2.AsyncClient
 {%- if with_database %}
     db_session_factory: async_sessionmaker[AsyncSession]
+{%- endif %}
+{%- if with_cache %}
+    cache: ValkeyCache
 {%- endif %}
     # Checked by `/health/ready`, keyed by resource name.
     readiness_checks: Mapping[str, ReadinessCheck] = field(
@@ -57,6 +63,16 @@ def get_http_client(state: AppStateDep) -> httpx2.AsyncClient:
 
 type SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 type HttpClientDep = Annotated[httpx2.AsyncClient, Depends(get_http_client)]
+{%- if with_cache %}
+
+
+def get_cache(state: AppStateDep) -> ValkeyCache:
+    return state.cache
+
+
+# For the adapters behind feature ports (`infrastructure/cache/`), not for use cases directly.
+type CacheDep = Annotated[ValkeyCache, Depends(get_cache)]
+{%- endif %}
 {%- if with_database %}
 
 

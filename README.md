@@ -13,13 +13,15 @@ A generated service has:
 - **FastAPI** with `/health/live` and `/health/ready`, pydantic-settings
 - **PostgreSQL** (question `with_database`, default yes): SQLAlchemy 2 async + asyncpg, Alembic,
   session per request, readiness check, traced queries, testcontainers integration tests
+- **Valkey cache** (question `with_cache`, default no): redis-py async client, a `ValkeyCache`
+  adapter (TTL on every write, Valkey down = miss), traced commands, testcontainers integration tests
 - **OpenTelemetry**: traces, metrics and logs over OTLP; FastAPI and httpx2 auto-instrumented;
-  stable HTTP semantic conventions; trace context helpers for Redis Streams messages
+  stable HTTP semantic conventions
 - **structlog**: JSON logs with `trace_id`/`span_id`, the same records exported to Loki
 - **ruff**, **pyright** strict, **pytest** (+ coverage, tests asserting spans and logs), **pre-commit**
 - **Dockerfile** (multi-stage, uv, non-root, healthcheck) and **GitHub Actions** CI publishing to GHCR
 - **AGENTS.md** (+ `CLAUDE.md` importing it) and Claude Code **skills**:
-  `add-endpoint`, `add-event-handler`, `verify-observability`
+  `add-endpoint`, `verify-observability`
 
 Update a service to the latest template: `make update-template` inside the service.
 

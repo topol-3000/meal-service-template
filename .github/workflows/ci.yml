@@ -11,14 +11,15 @@ permissions:
 jobs:
   generate-and-check:
     # Render the template and run the generated service's full check, like a real service would.
-    # Both answers of `with_database`; the database variant also runs its integration tests
-    # (testcontainers on the runner's Docker).
-    name: generate-and-check (with_database=${{ matrix.with_database }})
+    # Every combination of `with_database` and `with_cache`; the database and cache variants also
+    # run their integration tests (testcontainers on the runner's Docker).
+    name: generate-and-check (with_database=${{ matrix.with_database }}, with_cache=${{ matrix.with_cache }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         with_database: [true, false]
+        with_cache: [true, false]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -31,6 +32,7 @@ jobs:
           uvx copier copy --trust --defaults --vcs-ref HEAD \
             -d service_name=meal-sample -d python_version=3.14 \
             -d with_database=${{ matrix.with_database }} \
+            -d with_cache=${{ matrix.with_cache }} \
             . "$RUNNER_TEMP/meal-sample"
       - name: make check
         working-directory: ${{ runner.temp }}/meal-sample

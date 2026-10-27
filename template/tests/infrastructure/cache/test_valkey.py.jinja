@@ -1,0 +1,181 @@
+"""`ValkeyCache` and the client lifecycle against a real Valkey."""
+
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
+from redis.asyncio import Redis
+from redis.exceptions import ResponseError
+
+from {{ package_name }}.api.dependencies import AppState, CacheDep
+from {{ package_name }}.infrastructure.cache.valkey import ValkeyCache, create_cache_client
+from {{ package_name }}.main import create_app
+from {{ package_name }}.observability import configure_logging
+from {{ package_name }}.settings import Settings
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture
+async def cache(cache_settings: Settings) -> AsyncIterator[ValkeyCache]:
+    client = create_cache_client(cache_settings.cache)
+    yield ValkeyCache(client, default_ttl_seconds=cache_settings.cache.default_ttl_seconds)
+    await client.aclose()
+
+
+def _add_cached_route(app: FastAPI) -> FastAPI:
+    async def cached(cache: CacheDep) -> dict[str, bool]:
+        return {"hit": await cache.get("sample:1") is not None}
+
+    app.add_api_route("/cached", cached)
+    return app
+
+
+async def _client_ids(observer: Redis) -> set[str]:
+    # redis-py leaves the `**kwargs` of server commands untyped.
+    clients = await observer.client_list()  # pyright: ignore[reportUnknownMemberType]
+    return {client["id"] for client in clients}
+
+
+async def _valkey_command(client: Redis, *args: str) -> None:
+    # redis-py leaves the `**kwargs` of server commands untyped.
+    await client.execute_command(*args)  # pyright: ignore[reportUnknownMemberType]
+
+
+async def test_stored_value_is_read_back(cache: ValkeyCache) -> None:
+    await cache.set("sample:1", b'{"name": "soup"}')
+
+    assert await cache.get("sample:1") == b'{"name": "soup"}'
+
+
+async def test_missing_key_is_a_miss(cache: ValkeyCache) -> None:
+    assert await cache.get("sample:missing") is None
+
+
+async def test_deleted_key_is_a_miss(cache: ValkeyCache) -> None:
+    await cache.set("sample:1", b"soup")
+
+    await cache.delete("sample:1")
+
+    assert await cache.get("sample:1") is None
+
+
+async def test_every_write_expires_after_the_default_ttl(
+    cache: ValkeyCache, cache_client: Redis, cache_settings: Settings
+) -> None:
+    await cache.set("sample:1", b"soup")
+
+    default_ttl = cache_settings.cache.default_ttl_seconds
+    assert default_ttl - 5 < await cache_client.ttl("sample:1") <= default_ttl
+
+
+async def test_a_write_can_set_its_own_ttl(cache: ValkeyCache, cache_client: Redis) -> None:
+    await cache.set("sample:1", b"soup", ttl_seconds=5)
+
+    assert 0 < await cache_client.ttl("sample:1") <= 5
+
+
+async def test_errors_other_than_an_unavailable_cache_propagate(
+    cache: ValkeyCache, cache_client: Redis
+) -> None:
+    await cache_client.rpush("sample:list", "soup")
+
+    with pytest.raises(ResponseError, match="WRONGTYPE"):
+        await cache.get("sample:list")
+
+
+async def _write_while_valkey_refuses(
+    cache: ValkeyCache, cache_client: Redis, *, refuse: tuple[str, ...], accept: tuple[str, ...]
+) -> bytes | None:
+    """Store a value while Valkey refuses writes; return what is read back."""
+    await _valkey_command(cache_client, *refuse)
+    try:
+        await cache.set("sample:1", b"soup")
+        return await cache.get("sample:1")
+    finally:
+        await _valkey_command(cache_client, *accept)
+
+
+def _unavailable_logs(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    return [line for line in lines if line["event"] == "cache.unavailable"]
+
+
+async def test_a_full_valkey_skips_writes(
+    cache: ValkeyCache, cache_client: Redis, settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging(settings)
+
+    # Full, with the default `noeviction` policy.
+    value = await _write_while_valkey_refuses(
+        cache,
+        cache_client,
+        refuse=("CONFIG", "SET", "maxmemory", "1"),
+        accept=("CONFIG", "SET", "maxmemory", "0"),
+    )
+
+    assert value is None
+    [log] = _unavailable_logs(capsys)
+    assert (log["operation"], log["error_type"]) == ("set", "OutOfMemoryError")
+
+
+async def test_a_read_only_valkey_skips_writes(
+    cache: ValkeyCache, cache_client: Redis, settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging(settings)
+
+    # A replica, as the old primary becomes after a failover.
+    value = await _write_while_valkey_refuses(
+        cache,
+        cache_client,
+        refuse=("REPLICAOF", "127.0.0.1", "1"),
+        accept=("REPLICAOF", "NO", "ONE"),
+    )
+
+    assert value is None
+    [log] = _unavailable_logs(capsys)
+    assert (log["operation"], log["error_type"]) == ("set", "ReadOnlyError")
+
+
+def test_cache_commands_are_traced_inside_the_request_span(
+    cache_settings: Settings, span_exporter: InMemorySpanExporter
+) -> None:
+    with TestClient(_add_cached_route(create_app(cache_settings))) as client:
+        response = client.get("/cached")
+
+    assert response.json() == {"hit": False}
+    spans = span_exporter.get_finished_spans()
+    server = next(s for s in spans if s.kind == SpanKind.SERVER)
+    command = next(s for s in spans if s.kind == SpanKind.CLIENT and s.name == "GET")
+    assert (command.attributes or {}).get("db.system.name") == "redis"
+    assert server.context is not None
+    assert command.parent is not None
+    assert command.parent.span_id == server.context.span_id
+
+
+async def test_lifespan_closes_its_connections_on_shutdown(
+    cache_settings: Settings, cache_client: Redis
+) -> None:
+    before = await _client_ids(cache_client)
+    app = create_app(cache_settings)
+
+    async with app.router.lifespan_context(app):
+        state: AppState = app.state.app_state
+        await state.cache.get("sample:1")
+        opened = await _client_ids(cache_client) - before
+        assert len(opened) == 1
+
+    # Valkey drops a closed connection from its client list a moment after the client closes it.
+    still_open = opened
+    for _ in range(200):
+        still_open = opened & await _client_ids(cache_client)
+        if not still_open:
+            break
+        await asyncio.sleep(0.01)
+    assert not still_open

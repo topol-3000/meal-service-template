@@ -1,0 +1,107 @@
+"""Valkey down or too slow: lookups are misses, and the service starts, serves and is ready.
+
+The `settings` fixture points the cache at a port nobody listens on.
+"""
+
+import asyncio
+import json
+from typing import Any
+
+{% if with_database -%}
+import httpx2
+{% endif -%}
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
+
+from {{ package_name }}.api.dependencies import CacheDep
+from {{ package_name }}.infrastructure.cache.valkey import ValkeyCache, create_cache_client
+from {{ package_name }}.main import create_app
+from {{ package_name }}.observability import configure_logging
+from {{ package_name }}.settings import CacheSettings, Settings
+
+
+def _unavailable_logs(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    return [line for line in lines if line["event"] == "cache.unavailable"]
+
+
+async def test_each_call_is_a_miss_or_a_no_op_logged_once(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Configure logging inside the test: the handler binds to the stdout that capsys captures.
+    configure_logging(settings)
+    client = create_cache_client(settings.cache)
+    cache = ValkeyCache(client, default_ttl_seconds=60)
+
+    assert await cache.get("sample:1") is None
+    await cache.set("sample:1", b"soup")
+    await cache.delete("sample:1")
+    await client.aclose()
+
+    logs = _unavailable_logs(capsys)
+    assert [log["operation"] for log in logs] == ["get", "set", "delete"]
+    assert all(log["level"] == "warning" for log in logs)
+    assert all(log["error_type"] == "ConnectionError" for log in logs)
+
+
+async def test_a_cache_that_does_not_answer_is_a_miss_after_the_timeout(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def never_answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()
+        writer.close()
+
+    server = await asyncio.start_server(never_answer, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    configure_logging(settings)
+    client = create_cache_client(
+        CacheSettings(url=SecretStr(f"redis://127.0.0.1:{port}/0"), timeout_seconds=0.1)
+    )
+    cache = ValkeyCache(client, default_ttl_seconds=60)
+
+    # Well under a second: no retries on top of the timeout.
+    async with asyncio.timeout(1):
+        assert await cache.get("sample:1") is None
+    await client.aclose()
+    server.close()
+    await server.wait_closed()
+
+    [log] = _unavailable_logs(capsys)
+    assert log["operation"] == "get"
+    assert log["error_type"] == "TimeoutError"
+
+
+def test_requests_succeed_while_valkey_is_down(
+    settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def cached(cache: CacheDep) -> dict[str, bool]:
+        return {"hit": await cache.get("sample:1") is not None}
+
+    app = create_app(settings)
+    app.add_api_route("/cached", cached)
+    with TestClient(app) as client:
+        response = client.get("/cached")
+
+    assert response.status_code == 200
+    assert response.json() == {"hit": False}
+    assert len(_unavailable_logs(capsys)) == 1
+{%- if with_database %}
+
+
+@pytest.mark.integration
+async def test_ready_does_not_check_the_cache(db_client: httpx2.AsyncClient) -> None:
+    # A real database, and the cache URL of `settings`, where nothing listens.
+    response = await db_client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["checks"] == {"database": "ok"}
+{%- else %}
+
+
+def test_ready_does_not_check_the_cache(client: TestClient) -> None:
+    response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["checks"] == {}
+{%- endif %}

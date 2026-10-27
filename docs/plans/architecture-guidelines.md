@@ -39,14 +39,14 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 | D9 | Auth | Out of scope for the template for now. No auth code, docs or library choice in this plan; it gets its own plan when the first service needs it. |
 | D10 | Cache | Opt-in Copier question `with_cache: bool` (default `false`), like D6. When true it renders a Valkey cache adapter, `CacheSettings`, the client lifecycle, the cache doc and skill, and the redis-py dependency. Server: Valkey (BSD-3, Linux Foundation; Redis 8 extras aren't needed). Client: redis-py `redis.asyncio`, traced by `opentelemetry-instrumentation-redis`. Not valkey-py (no OTel instrumentation, slow releases) and not Valkey GLIDE (its Python OTel exports separately and can't attach spans to the app's trace). The cache is an optimisation, never the source of truth: every write has a TTL, a cache error counts as a miss (logged once, request continues), and `/health/ready` does not check it. All cache calls go through one adapter in `infrastructure/cache/`, so the client can be swapped in one file. Revisit the client when GLIDE's Python client accepts a parent span context, or if redis-py stops working with Valkey. |
 | D14 | Events between services | Not in the template: no event bus, stream consumers or background workers (Redis/Valkey Streams, Celery). Services talk over HTTP. If a service needs messaging, it gets its own plan and decision first. |
-| D11 | Migrations in deployment | A one-off job from the service image runs `python -m <package> migrate` before the new version starts (compose: a `<service>-migrate` service the app waits on with `depends_on: condition: service_completed_successfully`; Kubernetes: init container or pre-upgrade Job). Not in the container entrypoint (replicas race, a failed migration becomes a crash loop) and not from CI (CI would need database credentials and network access). Migrations ship inside the package (`infrastructure/db/migrations/`); a PostgreSQL advisory lock serialises concurrent runs. Migrations must work with the previous release too (expand, then contract). |
+| D11 | Migrations in deployment | A one-off job from the service image runs `python -m <package> migrate` before the new version starts (compose: a `<service>-migrate` service the app waits on with `depends_on: condition: service_completed_successfully`; Kubernetes: init container or pre-upgrade Job). Not in the container entrypoint (replicas race, a failed migration becomes a crash loop) and not from CI (CI would need database credentials and network access). Migrations ship inside the package (`infrastructure/db/migrations/`); a PostgreSQL advisory lock serialises concurrent runs. Migrations must work with the previous release too (expand, then contract). The job runs with the service's whole environment, not only `DB__URL`: it loads the same `Settings`, so with `with_cache` it needs `CACHE__URL` too (Q8). One environment for the app and its job keeps "a missing variable stops startup" true and needs no second settings class. |
 | D12 | Local PostgreSQL | One PostgreSQL in meal-platform compose on `localhost:5432`, with a database and a user per service (service code never reads another service's tables). Local credentials follow `.env.example`: user, password and database are all named after the package. meal-platform gets an idempotent way to add a service's database (init scripts run only on a fresh volume). Tests keep using testcontainers. |
 | D13 | PostgreSQL version | 18 (19 was still at RC in 2026-10; move after its first minor releases). The meal-platform compose tag is the reference; the template's `POSTGRES_IMAGE` test constant must match it. |
 
 ### Open questions
 
 None right now. New questions go here with a `Q<n>` id and move to Decisions once answered.
-(Q5–Q7 became D11–D13.)
+(Q5–Q7 became D11–D13; Q8, whether `migrate` needs `CACHE__URL`, became part of D11.)
 
 ---
 
@@ -263,23 +263,54 @@ Infrastructure only, no business logic. Each file comes with a test.
       readiness, span nesting, pool disposal, commit/rollback/failed commit, models vs
       migrations (`alembic check`) and a downgrade/upgrade round trip.
 - [x] **3.11** Tests: error-mapping test, lifespan open/close test, readiness test, settings parsing test.
-- [ ] **3.12** Remove the event parts of the template (D14): the `add-event-handler` skill,
+- [x] **3.12** Remove the event parts of the template (D14): the `add-event-handler` skill,
       `observability/propagation.py` and its exports and test, the "Events between services" and
       "Events: schemas in meal-platform `contracts/events/`" rules in `AGENTS.md.jinja`, and
       "Redis Streams" in the `infrastructure` docstring, the layering diagram and `README.md`.
       HTTP calls between services already carry trace context through the httpx2 instrumentation.
-- [ ] **3.13** Copier question `with_cache` in `copier.yml` (D10): `_exclude` for
+      The events rule in `AGENTS.md.jinja` became "other services are called over HTTP through
+      `HttpClientDep`, which carries the trace context"; "events" also left the list of
+      Pydantic boundaries.
+- [x] **3.13** Copier question `with_cache` in `copier.yml` (D10): `_exclude` for
       `infrastructure/cache/`, `tests/infrastructure/cache/` and `caching.md`;
       `{% if with_cache %}` blocks in settings, `AppState`, lifespan, telemetry, `.env.example`,
       `AGENTS.md` and `README`; conditional `redis` and `opentelemetry-instrumentation-redis` dependencies.
-- [ ] **3.14** (`with_cache`) `infrastructure/cache/`: `CacheSettings` (`CACHE__URL: SecretStr`,
+      The `caching.md` exclude comes with the doc in 1.7a. `AGENTS.md` gets one `cache/` line in
+      the layout; "needs Docker" in `make test` / `make test-unit` now also holds for `with_cache`.
+- [x] **3.14** (`with_cache`) `infrastructure/cache/`: `CacheSettings` (`CACHE__URL: SecretStr`,
       `redis://` or `rediss://`; `CACHE__DEFAULT_TTL_SECONDS`; short socket timeouts), one
       `redis.asyncio.Redis` created in the lifespan and closed through the `AsyncExitStack`,
       `CacheDep` in `api/dependencies.py`, global instrumentation in `instrument_app`.
       No business cache in the skeleton; the `add-cache` skill shows the pattern.
-- [ ] **3.15** (`with_cache`) testcontainers Valkey fixture (`valkey/valkey:9`, matching the
+      Added: `ValkeyCache` in `infrastructure/cache/valkey.py`, the one generic adapter over the
+      client (`get(key) -> bytes | None`, `set(key, value, ttl_seconds=None)` that always sends a
+      TTL, `delete(key)`). redis-py connection errors and timeouts, and the refused writes of a
+      read-only replica (`ReadOnlyError`, after a failover) or a full Valkey
+      (`OutOfMemoryError`), become a miss or a no-op, logged once per call as
+      `cache.unavailable` (warning, with `operation` and `error_type`, no key); other errors
+      (wrong type, invalid TTL) propagate. A wrong password (`AuthenticationError`) and a full
+      pool (`MaxConnectionsError`, redis-py's async default is 100) are connection errors, so
+      misses too; `error_type` tells them apart from an outage. No pool-size setting yet. `CacheDep` yields `ValkeyCache`; feature caches wrap it behind their own
+      ports (1.7a). Defaults: TTL 300 s, `CACHE__CONNECT_TIMEOUT_SECONDS` and
+      `CACHE__TIMEOUT_SECONDS` 0.5 s. No ping at startup and no readiness check.
+      `retry=Retry(NoBackoff(), 0)` is set explicitly: `from_url` happens not to retry in
+      redis-py 8.1, but the `Redis()` constructor defaults to 10 retries with backoff; a test
+      bounds a miss against a silent server to one timeout.
+      Versions: `redis>=8.1`, `opentelemetry-instrumentation-redis>=0.66b1`, which accepts
+      `redis >= 2.6`, so no cap. `OTEL_SEMCONV_STABILITY_OPT_IN=http,database` with either
+      option. The instrumentation records commands without arguments (`GET ?`), so keys don't
+      reach span attributes; 1.7a's reason for "no personal data in keys" should name logs and
+      Valkey tooling (`MONITOR`, slowlog) instead. Two `pyright: ignore[reportUnknownMemberType]`
+      with reasons: redis-py's `from_url` and `RedisInstrumentor.instrument` have untyped `**kwargs`.
+- [x] **3.15** (`with_cache`) testcontainers Valkey fixture (`valkey/valkey:9`, matching the
       meal-platform compose tag), tests for the client lifecycle, span nesting under a request,
       and "Valkey down → miss, request succeeds".
+      testcontainers' own `ValkeyContainer` (`testcontainers[valkey]`), image in `VALKEY_IMAGE`.
+      Fixtures: `cache_url` (session container), `cache_client` (the test's own client, flushes
+      after each test), `cache_settings`. Unit tests run with `CACHE__URL` on a closed port, so
+      the Valkey-down tests (miss + `cache.unavailable` per call, requests via `CacheDep`,
+      `/health/ready` without a cache check, a silent server = miss within the timeout) need no
+      Docker. The lifespan test checks Valkey's `CLIENT LIST` for the app's connection.
 
 ## Phase 4: Port useful parts of the boilerplate
 
@@ -321,9 +352,10 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 - [ ] **6.2** Dependency audit of `uv.lock` (Trivy fs covers it; decide if a separate step is needed).
 - [x] **6.3** Template repo CI: render with `with_database=true` and `false` (matrix); both
       must pass `make check`, pre-commit and the Docker build.
-- [ ] **6.3a** Extend the matrix with `with_cache` (2 × 2 renders).
-      Job names are now `generate-and-check (with_database=true|false)`; update required
-      status checks if branch protection lists the old name.
+- [x] **6.3a** Extend the matrix with `with_cache` (2 × 2 renders).
+      Job names are now `generate-and-check (with_database=true|false, with_cache=true|false)`;
+      update required status checks if branch protection lists the old names. The template
+      repo's `AGENTS.md` asks for a check of every combination.
 - [x] **6.4** Generated service CI runs integration tests (Docker available on the runner, D7).
       Through `make check`, which runs `make test` (all tests).
 
@@ -348,7 +380,8 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 - [ ] **8.4** meal-platform compose (D11, D12, D13): `postgres:18-alpine` service on
       `localhost:5432` with a volume; an idempotent way to add a database and user per
       service (e.g. `make db-add name=meal-recipes`); the `<service>-migrate` one-off
-      service pattern for each service that has a database; a `valkey/valkey:9` service on
+      service pattern for each service that has a database, with the same environment as the
+      service (shared `env_file`, D11); a `valkey/valkey:9` service on
       `localhost:6379` for services with `with_cache` (D10).
 
 ## Progress log
@@ -364,3 +397,5 @@ style and `Extra.forbid`, per-route try/except error mapping, minimal ruff rule 
 | 2026-10-26 | Chunk 2 done (3.8–3.10, 6.3, 6.4; D3, D6, D7) on `feat/architecture-chunk-2`. Decided while implementing: **SQLAlchemy `>=2.0.55,<2.1`**, because `opentelemetry-instrumentation-sqlalchemy` 0.66b1 refuses 2.1 (support merged upstream 2026-10-14 in PR 5120, not released yet; lift the cap with the next contrib release). SQLAlchemy is instrumented globally in `instrument_app`, like httpx2 (per-engine instrumentation works once per process); `create_db_engine` calls `create_async_engine` through its module so the patched function is used. `OTEL_SEMCONV_STABILITY_OPT_IN=http,database`. `DbSessionDep` uses `scope="function"`, because the default scope commits after the response is sent. `DB__URL` is required and checked for the asyncpg scheme; `Settings` sets `hide_input_in_errors` (both variants), so a bad URL isn't echoed into startup logs. Alembic config in `[tool.alembic]` (no `alembic.ini`), date-prefixed revision files, ruff post-write hooks, async `env.py` reading `DB__URL` via `Settings` and logging through `configure_logging`; generated migrations pass ruff and pyright strict. `alembic` is a runtime dependency, but the image doesn't ship migrations yet (Q5). The `integration` marker and `make test-unit` render in both variants (future Valkey tests). DB integration tests use `httpx2.ASGITransport` in the test's loop instead of `TestClient` (asyncpg connections are loop-bound); the container is session-scoped, engines are per test. Test image `postgres:18-alpine` (Q7). Also: `.import_linter_cache/` gitignored in generated services. Open: Q5–Q7. |
 | 2026-10-26 | Q5–Q7 answered → D11 (migrations as a one-off job from the image), D12 (one PostgreSQL in meal-platform compose, database and user per service), D13 (PostgreSQL 18). Template: migrations moved into `infrastructure/db/migrations/` so they ship in the wheel; `python -m <package> migrate` (`__main__` gets `serve` / `migrate` commands; `make migrate` uses it); `pg_advisory_xact_lock` in `env.py`, key from the service name. Verified end to end: a revision made by `make migration` is in the image and applied by `docker run <image> python -m <package> migrate`. meal-platform side is 8.4. |
 | 2026-10-26 | Scope cut: no events in the template → D14; D10 now covers only an opt-in Valkey cache (`with_cache`). New items 1.7a, 3.12–3.15, 5.7, 6.3a; 5.6 drops `add-event-handler`. |
+| 2026-10-26 | Chunk 3 done (3.12–3.15, 6.3a; D10, D14) on `feat/architecture-chunk-3`. Events removed: `add-event-handler`, `propagation.py` (`inject_trace_context` / `extract_trace_context`) and their rules; calls between services are HTTP via `HttpClientDep`. `with_cache` (default false) renders `CacheSettings` (`CACHE__URL` required, `redis://`/`rediss://`, TTL 300 s, 0.5 s timeouts), one `redis.asyncio` client in the lifespan (no ping, no readiness check) and `ValkeyCache` (`get`/`set`/`delete`, TTL on every write, connection errors and timeouts = miss or no-op logged as `cache.unavailable`). Decided while implementing: the generic `ValkeyCache` adapter (features wrap it); retries switched off explicitly (redis-py's `Redis()` defaults to 10); **`redis>=8.1` uncapped** (`opentelemetry-instrumentation-redis` 0.66b1 accepts `redis >= 2.6`); commands are traced without arguments, so keys stay out of spans (1.7a to adjust); testcontainers' `ValkeyContainer` with `valkey/valkey:9`; unit tests point the cache at a closed port, so the Valkey-down behaviour is tested without Docker. The readiness tests' example check `cache` was renamed to `storage`. CI matrix 2 × 2. |
+| 2026-10-26 | Chunk-3 review follow-up: Q8 answered in D11 (the migrate job gets the service's whole environment, so `CACHE__URL` too). `ValkeyCache` also treats `ReadOnlyError` and `OutOfMemoryError` as unavailable (integration tests switch the test Valkey to a replica and to `maxmemory 1`), and `cache.unavailable` logs carry `error_type`. Circuit breaker for a long outage not added (D10: one log per call; 0.5 s timeouts bound the cost). |
