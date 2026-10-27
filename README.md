@@ -19,7 +19,11 @@ A generated service has:
   stable HTTP semantic conventions
 - **structlog**: JSON logs with `trace_id`/`span_id`, the same records exported to Loki
 - **ruff**, **pyright** strict, **pytest** (+ coverage, tests asserting spans and logs), **pre-commit**
-- **Dockerfile** (multi-stage, uv, non-root, healthcheck) and **GitHub Actions** CI publishing to GHCR
+- **Dockerfile** (multi-stage, uv, non-root, healthcheck, no pip in the runtime image) and
+  **GitHub Actions** CI publishing to GHCR
+- **Trivy** in CI on pull requests, main and weekly: dependencies from `uv.lock`, secrets and
+  Dockerfile checks on the repository, then the image before it is pushed (`CRITICAL,HIGH`
+  with a fix fail the build; accepted findings go in `.trivyignore`, each with a reason)
 - **AGENTS.md** (+ `CLAUDE.md` importing it), `docs/` (architecture, stack, conventions) and
   Claude Code **skills**: `add-feature`, `add-use-case`, `add-endpoint`, `add-external-client`,
   `add-setting`, `add-repository` (database), `add-cache` (cache), `verify-observability`

@@ -29,6 +29,23 @@ python3 "$OLDPWD/tools/docs-check/check_examples.py" .
 ```
 
 `--vcs-ref HEAD` renders the last commit, so commit (locally) before rendering.
+
+CI also runs the service's two Trivy scans on every render. To run them locally (same Trivy
+version as the action's `version` default; the fs scan before `uv sync`, as on a checkout):
+
+```bash
+docker run --rm -v trivy-cache:/root/.cache/trivy -v /tmp/meal-sample:/src:ro -w /src \
+  aquasec/trivy:0.70.0 fs . --scanners vuln,secret,misconfig --include-dev-deps \
+  --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+docker build -t meal-sample:ci /tmp/meal-sample
+docker run --rm -v trivy-cache:/root/.cache/trivy -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /tmp/meal-sample/.trivyignore:/.trivyignore:ro aquasec/trivy:0.70.0 image meal-sample:ci \
+  --scanners vuln,secret --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
+  --ignorefile /.trivyignore
+```
+
+Fix a finding in the template (dependency bound, Dockerfile, base image) rather than adding
+it to `template/.trivyignore`.
 Optional parts are Copier questions: their files are listed in `_exclude` in `copier.yml`,
 and shared files use `{% if with_database %}` / `{% if with_cache %}` blocks. Check that every
 variant renders.

@@ -1,6 +1,6 @@
 # Plan: architecture and coding guidelines for meal-* services
 
-Status: **draft** · Started: 2026-10-26 · Target release: template `v0.2.0`
+Status: **in progress** · Started: 2026-10-26 · Target release: template `v0.2.0`
 
 ## Goal
 
@@ -35,7 +35,7 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 | D5 | DI | No DI framework. Composition root in `main.py` (lifespan), dependency providers in `api/dependencies.py`, typed `Annotated[..., Depends(...)]` aliases. |
 | D6 | Database opt-in | Copier question `with_database: bool` (default `true`). When true it renders `infrastructure/db/`, Alembic, DB settings, the readiness check, Makefile targets and the SQLAlchemy/asyncpg/Alembic dependencies. When false, none of these exist and the generated service still passes `make check`. |
 | D7 | Integration-test database | `testcontainers[postgres]`: self-contained, one container per test session. Tests are marked `@pytest.mark.integration` and run in CI (Docker is available on GitHub runners). `make test` runs everything; `make test-unit` skips `integration`. |
-| D8 | Security scanning | Trivy in the template CI, a cleaned-up version of the boilerplate's workflow (see 6.1). |
+| D8 | Security scanning | Trivy in the generated service's CI, a cleaned-up version of the boilerplate's workflow (see 6.1): `aquasecurity/trivy-action` pinned by commit, one `fs` scan (vulnerabilities in `uv.lock` including dev dependencies, secrets, misconfigurations) and one scan of the image before it is pushed; `CRITICAL,HIGH` with a fix fails the build. Runs on pull requests, pushes to main and weekly. Findings are fixed; `.trivyignore` holds only findings without a fix, each with a reason and an `exp:` review date. The template repo's CI runs the same scans on every variant. No separate `uv.lock` audit (6.2). |
 | D9 | Auth | Out of scope for the template for now. No auth code, docs or library choice in this plan; it gets its own plan when the first service needs it. |
 | D10 | Cache | Opt-in Copier question `with_cache: bool` (default `false`), like D6. When true it renders a Valkey cache adapter, `CacheSettings`, the client lifecycle, the cache doc and skill, and the redis-py dependency. Server: Valkey (BSD-3, Linux Foundation; Redis 8 extras aren't needed). Client: redis-py `redis.asyncio`, traced by `opentelemetry-instrumentation-redis`. Not valkey-py (no OTel instrumentation, slow releases) and not Valkey GLIDE (its Python OTel exports separately and can't attach spans to the app's trace). The cache is an optimisation, never the source of truth: every write has a TTL, a cache error counts as a miss (logged once, request continues), and `/health/ready` does not check it. All cache calls go through one adapter in `infrastructure/cache/`, so the client can be swapped in one file. Revisit the client when GLIDE's Python client accepts a parent span context, or if redis-py stops working with Valkey. |
 | D14 | Events between services | Not in the template: no event bus, stream consumers or background workers (Redis/Valkey Streams, Celery). Services talk over HTTP. If a service needs messaging, it gets its own plan and decision first. |
@@ -45,8 +45,20 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 
 ### Open questions
 
-None right now. New questions go here with a `Q<n>` id and move to Decisions once answered.
+New questions go here with a `Q<n>` id and move to Decisions once answered.
 (Q5–Q7 became D11–D13; Q8, whether `migrate` needs `CACHE__URL`, became part of D11.)
+
+- **Q9 License scanning.** The boilerplate ran Trivy's `license` scanner (`CRITICAL,HIGH`,
+  exit code 1); D8 doesn't. What Trivy 0.70.0 sees on a rendered service (2026-10-27):
+  `fs` finds no licenses at all (`uv.lock` has no license data); the image scan reports
+  318 `HIGH` "restricted" entries (GPL/LGPL), every one from Debian packages of the
+  `python:3.14-slim` base, none from Python packages, plus 174 "unknown". So the
+  boilerplate's setting would fail every build. The real question is whether a copyleft
+  Python dependency (AGPL, GPL) must be stopped, given that services run as network
+  services and aren't distributed. Options: no license scan (today), a report-only image
+  scan, or a failing scan limited to Python packages with an allowlist (`--ignored-licenses`,
+  or a `trivy.yaml` with license categories). Worth deciding before the first service
+  ships; until then a new runtime dependency already needs approval (`docs/stack.md`).
 
 ---
 
@@ -412,11 +424,61 @@ because its recipes come from meal-recipes over HTTP. Their code is checked like
 
 ## Phase 6: CI and security
 
-- [ ] **6.1 Trivy** in the template CI (D8), improved on the boilerplate version: pinned
+- [x] **6.1 Trivy** in the template CI (D8), improved on the boilerplate version: pinned
       `aquasecurity/trivy-action` instead of `curl | sh` from `main`, one `fs` job
       (vuln, secret, misconfig) + image scan after `docker build`, `CRITICAL,HIGH`, `--ignore-unfixed`.
       A `.trivyignore` with a comment per entry.
-- [ ] **6.2** Dependency audit of `uv.lock` (Trivy fs covers it; decide if a separate step is needed).
+  - **Jobs in `ci.yml`, not a separate `trivy.yml`.** The image scan has to sit between the
+    build and the push in the `docker` job: a separate workflow would build the image a
+    second time and couldn't stop the push. The `fs` scan is a `trivy-fs` job running
+    beside `check`. One workflow means one schedule and one list of required checks.
+  - `docker` job: `build-push-action` with `load: true`, Trivy on the first metadata tag,
+    then a second `build-push-action` with `push: true`. The second one finds every layer
+    in the builder's cache, so the image is built once. `PUBLISH` (a push to main) gates
+    the login and the push.
+  - Triggers: `pull_request`, push to main, and `schedule` (Mondays 05:00 UTC). The
+    weekly run runs the whole workflow, `make check` included (which also catches drift in
+    the testcontainers images), and never publishes. The concurrency group includes the
+    event, so a weekly run can't cancel a publishing push. It scans what main builds that
+    day; images already in GHCR aren't rescanned.
+  - `aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25` (v0.36.0, signed
+    tag of 2026-04-22), which installs Trivy v0.70.0. It is pinned by commit because the
+    action's tags were rewritten in a 2026-03 supply chain attack; the other actions keep
+    version tags. To bump: resolve the new tag's commit (`gh api
+    repos/aquasecurity/trivy-action/git/ref/tags/<tag>`, then the tag object) and update
+    both the template's and this repo's `ci.yml`.
+  - DB cache: the action's built-in cache (`actions/cache` on `.cache/trivy`, one key per
+    day, restoring the latest one). Pull requests restore main's cache; pushes and the
+    weekly run keep it fresh. The cache directory is inside the checkout; a local `fs` scan
+    with the cache in that place gave no extra findings, so it isn't skipped.
+  - The `fs` scan includes dev dependencies (`TRIVY_INCLUDE_DEV_DEPS`). By default Trivy
+    skips `uv.lock`'s dev group (27 of 84 packages: pytest, ruff, testcontainers, pre-commit),
+    and those run in CI and on laptops; the image scan covers only runtime packages.
+    Image scan: `vuln,secret` (the Dockerfile's misconfigurations are in the `fs` scan).
+  - `.trivyignore`: empty, with a header asking for a comment per entry (finding, reason,
+    review date) and the review date as `exp:<date>`, after which the finding fails CI
+    again (checked with Trivy 0.70.0: a past `exp:` reports the finding, a future one hides
+    it). Both scans pass it as `trivyignores`. Entries added: none.
+  - Real finding, fixed: every image failed on four `HIGH` findings in the pip that ships
+    with `python:3.14-slim` (pip 26.2.2 vendors urllib3 2.7.0: CVE-2026-97687,
+    CVE-2026-97689; msgpack 1.1.2: GHSA-6v7p-g79w-8964; setuptools 70.3.0 as
+    `pkg_resources`: CVE-2025-47273). The app runs from its venv and never uses pip, so the
+    runtime stage now runs `pip uninstall pip`. The `fs` scans were clean.
+  - Template repo CI runs both scans on each of the four renders: `fs` right after
+    rendering (before `uv sync` creates `.venv`, so it sees what a service checkout sees)
+    and the image after `docker build`. The template repo's `AGENTS.md` has the
+    `docker run aquasec/trivy` commands for running them locally.
+  - Rendered docs: the `AGENTS.md` commands row says `make check` is everything CI runs
+    except the Trivy scans; Boundaries: ask before adding a `.trivyignore` entry, never ignore
+    a finding that has a fix. Template `README.md` lists the scans. Not done: SARIF upload to
+    code scanning (commented out in the boilerplate), license scanning (Q9).
+- [x] **6.2** Dependency audit of `uv.lock` (Trivy fs covers it; decide if a separate step is needed).
+      Covered by 6.1, no separate step. Evidence: Trivy 0.70.0 `fs --list-all-pkgs --format json`
+      on a `with_database` + `with_cache` render reports target `uv.lock` (type `uv`) with 57
+      runtime packages (fastapi, sqlalchemy, asyncpg, redis, alembic, httpx2,
+      opentelemetry-sdk, ...); with `--include-dev-deps` it reports 84, every package in
+      `uv.lock`. The image scan reads the same packages again from the venv's
+      `site-packages`.
 - [x] **6.3** Template repo CI: render with `with_database=true` and `false` (matrix); both
       must pass `make check`, pre-commit and the Docker build.
 - [x] **6.3a** Extend the matrix with `with_cache` (2 × 2 renders).
@@ -442,7 +504,9 @@ because its recipes come from meal-recipes over HTTP. Their code is checked like
 - [ ] **8.1** Update the template repo's `AGENTS.md` / `README.md` (new docs, new Copier questions).
 - [ ] **8.2** Tag `v0.2.0`; tag message lists breaking changes and steps for existing services
       (new dev dependency, `make check` now includes imports, new settings layout,
-      `inject_trace_context`/`extract_trace_context` and `add-event-handler` removed).
+      `inject_trace_context`/`extract_trace_context` and `add-event-handler` removed;
+      CI runs Trivy weekly and fails on fixable `CRITICAL,HIGH` findings; the runtime image
+      no longer has pip).
 - [ ] **8.3** Record the decisions D1–D14 as ADRs in meal-platform `docs/adr/`.
 - [ ] **8.4** Done before Phase 5 (F3). meal-platform compose (D11, D12, D13): `postgres:18-alpine` service on
       `localhost:5432` with a volume; an idempotent way to add a database and user per
@@ -485,3 +549,4 @@ Open items that wait on something outside the chunks above.
 | 2026-10-26 | Chunk-3 review follow-up: Q8 answered in D11 (the migrate job gets the service's whole environment, so `CACHE__URL` too). `ValkeyCache` also treats `ReadOnlyError` and `OutOfMemoryError` as unavailable (integration tests switch the test Valkey to a replica and to `maxmemory 1`), and `cache.unavailable` logs carry `error_type`. Circuit breaker for a long outage not added (D10: one log per call; 0.5 s timeouts bound the cost). |
 | 2026-10-27 | Chunk 4 done (1.1–1.9, 1.7a, 3.16) on `feat/architecture-chunk-4`. Follow-ups F1–F3 added; F3 decided: 8.4 (meal-platform compose) comes before Phase 5, `make migration` keeps using `DB__URL`. `cache.lookups` counter (`result` = hit/miss/unavailable) and a `metric_reader` fixture in every variant. Agent docs: slim `AGENTS.md` (≤ 150 lines) + `docs/` with pasteable examples, verified per variant by script (examples pass `make check`; links, anchors and code references resolve). Checked against PostgreSQL 18: `autocommit_block()` releases the `pg_advisory_xact_lock` and it is not taken again, and the current revision is stamped only after `upgrade()`, so a failure after the block repeats it. `add-endpoint` no longer says to map errors to `HTTPException`. |
 | 2026-10-27 | Chunk 5 done (5.1–5.7) on `feat/architecture-chunk-5`. First, the doc checkers moved into `tools/docs-check/` (service dir as argument, `DEPENDS` root-relative and transitive), cover `.claude/skills/*/SKILL.md`, and run in every CI variant after `make check`; the template's `AGENTS.md` documents the example conventions. Planted errors (a bad reference, a broken example) fail them. Skills: `add-feature`, `add-use-case`, `add-setting`, `add-external-client`, `add-endpoint` (rewritten), `add-repository` (`with_database`), `add-cache` (`with_cache`); `verify-observability` brought up to date. Decided while implementing: worked examples extend the `recipes` example over HTTP so they run in every variant; a timeout rule in `errors.md`; retries left out of 5.5. Rendered `AGENTS.md`: 131–150 lines. 8.4 (meal-platform compose) is still open, so `make migration` in `add-repository` needs a PostgreSQL started by hand until it lands. |
+| 2026-10-27 | Chunk 6 done (6.1, 6.2; D8) on `feat/architecture-chunk-6`. Trivy jobs in the generated service's `ci.yml` (`trivy-fs` beside `check`; the image scanned inside the `docker` job between a `load: true` build and the push), on pull requests, main and weekly; `aquasecurity/trivy-action` v0.36.0 pinned by commit (Trivy v0.70.0), its built-in DB cache; `.trivyignore` with a header, `exp:` as the review date, no entries. Fixed instead of ignored: four `HIGH` findings in the base image's pip (vendored urllib3, msgpack, setuptools); the runtime stage uninstalls pip. 6.2 closed: Trivy reads `uv.lock` (57 runtime packages, 84 with the dev deps the `fs` scan includes). Template CI runs both scans on all four renders. Q9 (license scanning) opened. Plan status: in progress. |

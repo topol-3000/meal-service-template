@@ -34,6 +34,22 @@ jobs:
             -d with_database=${{ matrix.with_database }} \
             -d with_cache=${{ matrix.with_cache }} \
             . "$RUNNER_TEMP/meal-sample"
+      # The generated service's two Trivy scans (template/.github/workflows/ci.yml; keep the
+      # inputs and the pinned commit in sync), so a template change that adds a HIGH or
+      # CRITICAL finding fails here. The fs scan runs before `uv sync` creates `.venv`, on
+      # the same files as a service checkout.
+      - name: Trivy scans the repository
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_INCLUDE_DEV_DEPS: "true"
+        with:
+          scan-type: fs
+          scan-ref: ${{ runner.temp }}/meal-sample
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: ${{ runner.temp }}/meal-sample/.trivyignore
       - name: make check
         working-directory: ${{ runner.temp }}/meal-sample
         run: |
@@ -67,3 +83,13 @@ jobs:
       - name: Docker image builds
         working-directory: ${{ runner.temp }}/meal-sample
         run: docker build -t meal-sample:ci .
+      - name: Trivy scans the image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: meal-sample:ci
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: ${{ runner.temp }}/meal-sample/.trivyignore
+          skip-setup-trivy: true # installed by the repository scan

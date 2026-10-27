@@ -14,7 +14,7 @@ service boundary.
 | Task | Command |
 |---|---|
 | Install deps and hooks | `make install` |
-| Everything CI runs | `make check` |
+| Everything CI runs, except the Trivy scans | `make check` |
 | Lint / autofix | `make lint` / `make fmt` |
 | Types (pyright strict) | `make typecheck` |
 | Layer contracts (import-linter) | `make imports` |
@@ -143,9 +143,9 @@ Dependency direction: `api → application → domain ← infrastructure`, check
 - Contracts: when the HTTP API changes, update its OpenAPI copy in meal-platform
   `contracts/openapi/` in the same change.
 - Ask before: adding a new runtime dependency, changing a contract, changing CI or Dockerfile,
-  touching anything in `observability/` beyond adding helpers.
+  adding a `.trivyignore` entry, touching anything in `observability/` beyond adding helpers.
 - Never: commit secrets or `.env`, disable or skip tests to get green, weaken pyright or ruff
-  settings, edit `.copier-answers.yml` by hand.
+  settings, edit `.copier-answers.yml` by hand, ignore a Trivy finding that has a fix.
 - Files that come from meal-service-template (CI, Dockerfile, observability, tooling config)
   should be improved in the template and pulled with `make update-template`.
 
