@@ -20,7 +20,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
 FROM python:${PYTHON_VERSION}-slim AS runtime
-RUN groupadd --system app && useradd --system --gid app --no-create-home app
+# The app runs from its own venv, so the base image's pip is never used. Removing it also
+# removes the packages it vendors (urllib3, msgpack, ...), which the image scan reports.
+RUN python -m pip uninstall --yes --root-user-action=ignore pip \
+    && groupadd --system app && useradd --system --gid app --no-create-home app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

@@ -1,0 +1,11 @@
+# Trivy findings accepted on purpose. Both scans in .github/workflows/ci.yml read this file.
+#
+# Fix a finding instead whenever a fix exists: `uv lock --upgrade-package <pkg>` (or raise
+# the bound in pyproject.toml), a newer base image, or a Dockerfile change. Add an entry
+# only when there is no fix, and only after the team agrees.
+#
+# Every entry needs a comment above it: the finding, why it is accepted, and a review date.
+# Put the review date on the entry as `exp:`: after it the finding fails CI again.
+#
+#   # CVE-2026-12345 (somepkg): only reachable through X, which we don't use. Review by 2027-01-31.
+#   CVE-2026-12345 exp:2027-01-31
