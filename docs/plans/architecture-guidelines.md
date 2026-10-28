@@ -508,12 +508,22 @@ because its recipes come from meal-recipes over HTTP. Their code is checked like
       CI runs Trivy weekly and fails on fixable `CRITICAL,HIGH` findings; the runtime image
       no longer has pip).
 - [ ] **8.3** Record the decisions D1–D14 as ADRs in meal-platform `docs/adr/`.
-- [ ] **8.4** Done before Phase 5 (F3). meal-platform compose (D11, D12, D13): `postgres:18-alpine` service on
+      D14 is done: ADR 0005 "Services talk over HTTP; no event bus for now" supersedes
+      ADR 0003 (Redis Streams), written with 8.4. D1–D13 remain.
+- [x] **8.4** Planned before Phase 5 (F3), done after it. meal-platform compose (D11, D12, D13): `postgres:18-alpine` service on
       `localhost:5432` with a volume; an idempotent way to add a database and user per
       service (e.g. `make db-add name=meal-recipes`); the `<service>-migrate` one-off
       service pattern for each service that has a database, with the same environment as the
       service (shared `env_file`, D11); a `valkey/valkey:9` service on
       `localhost:6379` for services with `with_cache` (D10).
+      Done on meal-platform `feat/local-platform`, merged with main's Stage 0 platform:
+      core = `grafana/otel-lgtm`, `postgres:18-alpine` (volume `postgres18_data`) and
+      `valkey/valkey:9`; `make db-add name=meal-<name>` (idempotent, works on an existing
+      volume, revokes `CONNECT` from `PUBLIC`); `docs/adding-a-service.md` with the
+      `<service>-migrate` job and a shared `env_file`. Kept from main: Ollama (`ai`) and
+      Langfuse (`langfuse`) profiles; Langfuse's database is now made by a `langfuse-db`
+      job on every start instead of an init script. Removed: the Redis event bus and
+      `contracts/events/` (D14).
 
 ## Follow-ups
 
@@ -523,14 +533,15 @@ Open items that wait on something outside the chunks above.
       `opentelemetry-instrumentation-sqlalchemy` release (2.1 support was merged upstream in
       PR 5120 on 2026-10-14; 0.66b1 refuses 2.1). Raise that package's lower bound to the
       release, drop the comment, and run `make check` on SQLAlchemy 2.1 in the `with_database` renders.
-- [ ] **F2** `POSTGRES_IMAGE` (`postgres:18-alpine`) and `VALKEY_IMAGE` (`valkey/valkey:9`) in
+- [x] **F2** `POSTGRES_IMAGE` (`postgres:18-alpine`) and `VALKEY_IMAGE` (`valkey/valkey:9`) in
       `tests/conftest.py.jinja` must match the images in meal-platform compose (D13, D10).
-      meal-platform has no compose file yet; compare when 8.4 lands and on every image bump in either repo.
-- [ ] **F3** `make migration` autogenerates against `DB__URL`, so it needs a running
+      Matched with 8.4. Keeping them in step on every bump is now a rule in meal-platform's `AGENTS.md`.
+- [x] **F3** `make migration` autogenerates against `DB__URL`, so it needs a running
       PostgreSQL, which locally is meal-platform compose (8.4).
       Decided 2026-10-27: do 8.4 first, before Phase 5 (`add-repository` runs `make migration`);
       `make migration` keeps autogenerating against `DB__URL`. Not chosen: autogenerate
-      against a throwaway testcontainer migrated to head.
+      against a throwaway testcontainer migrated to head. Resolved by 8.4: `make db-add`, then
+      `make migration` against the compose PostgreSQL.
 
 ## Progress log
 
@@ -550,3 +561,4 @@ Open items that wait on something outside the chunks above.
 | 2026-10-27 | Chunk 4 done (1.1–1.9, 1.7a, 3.16) on `feat/architecture-chunk-4`. Follow-ups F1–F3 added; F3 decided: 8.4 (meal-platform compose) comes before Phase 5, `make migration` keeps using `DB__URL`. `cache.lookups` counter (`result` = hit/miss/unavailable) and a `metric_reader` fixture in every variant. Agent docs: slim `AGENTS.md` (≤ 150 lines) + `docs/` with pasteable examples, verified per variant by script (examples pass `make check`; links, anchors and code references resolve). Checked against PostgreSQL 18: `autocommit_block()` releases the `pg_advisory_xact_lock` and it is not taken again, and the current revision is stamped only after `upgrade()`, so a failure after the block repeats it. `add-endpoint` no longer says to map errors to `HTTPException`. |
 | 2026-10-27 | Chunk 5 done (5.1–5.7) on `feat/architecture-chunk-5`. First, the doc checkers moved into `tools/docs-check/` (service dir as argument, `DEPENDS` root-relative and transitive), cover `.claude/skills/*/SKILL.md`, and run in every CI variant after `make check`; the template's `AGENTS.md` documents the example conventions. Planted errors (a bad reference, a broken example) fail them. Skills: `add-feature`, `add-use-case`, `add-setting`, `add-external-client`, `add-endpoint` (rewritten), `add-repository` (`with_database`), `add-cache` (`with_cache`); `verify-observability` brought up to date. Decided while implementing: worked examples extend the `recipes` example over HTTP so they run in every variant; a timeout rule in `errors.md`; retries left out of 5.5. Rendered `AGENTS.md`: 131–150 lines. 8.4 (meal-platform compose) is still open, so `make migration` in `add-repository` needs a PostgreSQL started by hand until it lands. |
 | 2026-10-27 | Chunk 6 done (6.1, 6.2; D8) on `feat/architecture-chunk-6`. Trivy jobs in the generated service's `ci.yml` (`trivy-fs` beside `check`; the image scanned inside the `docker` job between a `load: true` build and the push), on pull requests, main and weekly; `aquasecurity/trivy-action` v0.36.0 pinned by commit (Trivy v0.70.0), its built-in DB cache; `.trivyignore` with a header, `exp:` as the review date, no entries. Fixed instead of ignored: four `HIGH` findings in the base image's pip (vendored urllib3, msgpack, setuptools); the runtime stage uninstalls pip. 6.2 closed: Trivy reads `uv.lock` (57 runtime packages, 84 with the dev deps the `fs` scan includes). Template CI runs both scans on all four renders. Q9 (license scanning) opened. Plan status: in progress. |
+| 2026-10-28 | 8.4 done on meal-platform `feat/local-platform`, merged with main's Stage 0 platform (PostgreSQL 17, Redis Streams, Ollama, Langfuse, init-script databases). Core follows D10–D13; Ollama and Langfuse stay as profiles, Langfuse's database from a `langfuse-db` job. D14 recorded as ADR 0005, superseding ADR 0003; `contracts/events/` removed. F2 and F3 closed. CI there: shellcheck, the core stack with `db-add` checks, and the Langfuse profile. |
