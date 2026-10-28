@@ -42,23 +42,15 @@ The level of detail comes from `fastapi-boilerplate-main` (per-layer rules, the 
 | D11 | Migrations in deployment | A one-off job from the service image runs `python -m <package> migrate` before the new version starts (compose: a `<service>-migrate` service the app waits on with `depends_on: condition: service_completed_successfully`; Kubernetes: init container or pre-upgrade Job). Not in the container entrypoint (replicas race, a failed migration becomes a crash loop) and not from CI (CI would need database credentials and network access). Migrations ship inside the package (`infrastructure/db/migrations/`); a PostgreSQL advisory lock serialises concurrent runs. Migrations must work with the previous release too (expand, then contract). The job runs with the service's whole environment, not only `DB__URL`: it loads the same `Settings`, so with `with_cache` it needs `CACHE__URL` too (Q8). One environment for the app and its job keeps "a missing variable stops startup" true and needs no second settings class. |
 | D12 | Local PostgreSQL | One PostgreSQL in meal-platform compose on `localhost:5432`, with a database and a user per service (service code never reads another service's tables). Local credentials follow `.env.example`: user, password and database are all named after the package. meal-platform gets an idempotent way to add a service's database (init scripts run only on a fresh volume). Tests keep using testcontainers. |
 | D13 | PostgreSQL version | 18 (19 was still at RC in 2026-10; move after its first minor releases). The meal-platform compose tag is the reference; the template's `POSTGRES_IMAGE` test constant must match it. |
+| D15 | License scanning | None. Neither a generated service's CI nor the template's runs Trivy's `license` scanner, failing or report-only, and no other tool checks licenses. Found when deciding (Trivy 0.70.0, 2026-10-27): the `fs` scan sees no licenses (`uv.lock` has none), and the image scan's 318 `HIGH` "restricted" (GPL/LGPL) and 174 "unknown" entries all come from the `python:3.14-slim` Debian packages, none from Python packages; the boilerplate's setting (`CRITICAL,HIGH`, exit code 1) would fail every build. Services run as network services and aren't distributed. Revisit if code or images are published, or with business mode (meal-platform roadmap stage 6). meal-platform ADR 0017. |
 
 ### Open questions
 
 New questions go here with a `Q<n>` id and move to Decisions once answered.
-(Q5–Q7 became D11–D13; Q8, whether `migrate` needs `CACHE__URL`, became part of D11.)
+(Q5–Q7 became D11–D13; Q8, whether `migrate` needs `CACHE__URL`, became part of D11;
+Q9, license scanning, became D15.)
 
-- **Q9 License scanning.** The boilerplate ran Trivy's `license` scanner (`CRITICAL,HIGH`,
-  exit code 1); D8 doesn't. What Trivy 0.70.0 sees on a rendered service (2026-10-27):
-  `fs` finds no licenses at all (`uv.lock` has no license data); the image scan reports
-  318 `HIGH` "restricted" entries (GPL/LGPL), every one from Debian packages of the
-  `python:3.14-slim` base, none from Python packages, plus 174 "unknown". So the
-  boilerplate's setting would fail every build. The real question is whether a copyleft
-  Python dependency (AGPL, GPL) must be stopped, given that services run as network
-  services and aren't distributed. Options: no license scan (today), a report-only image
-  scan, or a failing scan limited to Python packages with an allowlist (`--ignored-licenses`,
-  or a `trivy.yaml` with license categories). Worth deciding before the first service
-  ships; until then a new runtime dependency already needs approval (`docs/stack.md`).
+None open.
 
 ---
 
@@ -471,7 +463,7 @@ because its recipes come from meal-recipes over HTTP. Their code is checked like
   - Rendered docs: the `AGENTS.md` commands row says `make check` is everything CI runs
     except the Trivy scans; Boundaries: ask before adding a `.trivyignore` entry, never ignore
     a finding that has a fix. Template `README.md` lists the scans. Not done: SARIF upload to
-    code scanning (commented out in the boilerplate), license scanning (Q9).
+    code scanning (commented out in the boilerplate), license scanning (none, D15).
 - [x] **6.2** Dependency audit of `uv.lock` (Trivy fs covers it; decide if a separate step is needed).
       Covered by 6.1, no separate step. Evidence: Trivy 0.70.0 `fs --list-all-pkgs --format json`
       on a `with_database` + `with_cache` render reports target `uv.lock` (type `uv`) with 57
@@ -565,3 +557,4 @@ Open items that wait on something outside the chunks above.
 | 2026-10-27 | Chunk 6 done (6.1, 6.2; D8) on `feat/architecture-chunk-6`. Trivy jobs in the generated service's `ci.yml` (`trivy-fs` beside `check`; the image scanned inside the `docker` job between a `load: true` build and the push), on pull requests, main and weekly; `aquasecurity/trivy-action` v0.36.0 pinned by commit (Trivy v0.70.0), its built-in DB cache; `.trivyignore` with a header, `exp:` as the review date, no entries. Fixed instead of ignored: four `HIGH` findings in the base image's pip (vendored urllib3, msgpack, setuptools); the runtime stage uninstalls pip. 6.2 closed: Trivy reads `uv.lock` (57 runtime packages, 84 with the dev deps the `fs` scan includes). Template CI runs both scans on all four renders. Q9 (license scanning) opened. Plan status: in progress. |
 | 2026-10-28 | 8.4 done on meal-platform `feat/local-platform`, merged with main's Stage 0 platform (PostgreSQL 17, Redis Streams, Ollama, Langfuse, init-script databases). Core follows D10–D13; Ollama and Langfuse stay as profiles, Langfuse's database from a `langfuse-db` job. D14 recorded as ADR 0005, superseding ADR 0003; `contracts/events/` removed. F2 and F3 closed. CI there: shellcheck, the core stack with `db-add` checks, and the Langfuse profile. |
 | 2026-10-28 | 8.3 done: D1–D13 recorded as meal-platform ADRs 0006–0016 (D3 and D6 share 0008, D12 and D13 share 0016). |
+| 2026-10-28 | Q9 answered → D15: no license scanning, failing or report-only (meal-platform ADR 0017). No open questions left. |
