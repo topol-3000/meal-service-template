@@ -482,14 +482,27 @@ because its recipes come from meal-recipes over HTTP. Their code is checked like
 
 ## Phase 7: Verification
 
-- [ ] **7.1** Render a sample service for every `with_database` × `with_cache` combination:
+- [x] **7.1** Render a sample service for every `with_database` × `with_cache` combination:
       `make check` + pre-commit pass with zero edits in all four.
-- [ ] **7.2** Deliberately break each rule (domain imports fastapi, `Optional`, `requests`)
+      Done by the template's CI on every pull request (four renders: `make check`, pre-commit,
+      both docs checkers, Docker build and the Trivy scans).
+- [x] **7.2** Deliberately break each rule (domain imports fastapi, `Optional`, `requests`)
       and confirm the tooling fails.
+      Caught from the start: every layer and framework import import-linter forbids (14 cases),
+      `typing.Optional`/`Union`/`List`/`Dict`, `requests`/`aiohttp`/`httpx`, `print`,
+      `logging.getLogger`, an unannotated function. Four rules only the docs stated, now
+      enforced: `from __future__ import annotations` (ruff `banned-api`), `Any` in domain and
+      application signatures (ruff `ANN401` there only), `# type: ignore` (pyright
+      `enableTypeIgnoreComments = false`, and `reportUnnecessaryTypeIgnoreComment`, which found
+      a stale `# pyright: ignore` in `tests/test_observability.py`), and a broad
+      `except Exception` (ruff `BLE`; before, only `except Exception: pass` was caught). The
+      readiness check's catch-all is marked `noqa: BLE001`, as `errors.md` allows.
 - [ ] **7.3 Agent dry run.** In a rendered sample, ask an agent to "add recipe import by URL"
       using only the repo docs. Review the result against this plan: right folders, ports,
       error mapping, spans, tests with fakes. Fix the docs where the agent went wrong. Repeat once.
-- [ ] **7.4** Check that `AGENTS.md` stays under about 150 lines and every link resolves.
+- [x] **7.4** Check that `AGENTS.md` stays under about 150 lines and every link resolves.
+      131 / 138 / 143 / 150 lines (no options / cache / database / both); `check_refs.py`
+      resolves every link and reference in all four (also in CI).
 
 ## Phase 8: Release
 
@@ -498,7 +511,9 @@ because its recipes come from meal-recipes over HTTP. Their code is checked like
       (new dev dependency, `make check` now includes imports, new settings layout,
       `inject_trace_context`/`extract_trace_context` and `add-event-handler` removed;
       CI runs Trivy weekly and fails on fixable `CRITICAL,HIGH` findings; the runtime image
-      no longer has pip).
+      no longer has pip; new ruff and pyright checks from 7.2: `from __future__ import annotations`,
+      `Any` in domain/application signatures, broad `except`, `# type: ignore` and unneeded
+      `# pyright: ignore`).
 - [x] **8.3** Record the decisions D1–D14 as ADRs in meal-platform `docs/adr/`.
       D14 is ADR 0005 "Services talk over HTTP; no event bus for now" (supersedes ADR 0003,
       Redis Streams), written with 8.4. D1–D13 are ADRs 0006–0016: D1 → 0006, D2 → 0007,
@@ -558,3 +573,4 @@ Open items that wait on something outside the chunks above.
 | 2026-10-28 | 8.4 done on meal-platform `feat/local-platform`, merged with main's Stage 0 platform (PostgreSQL 17, Redis Streams, Ollama, Langfuse, init-script databases). Core follows D10–D13; Ollama and Langfuse stay as profiles, Langfuse's database from a `langfuse-db` job. D14 recorded as ADR 0005, superseding ADR 0003; `contracts/events/` removed. F2 and F3 closed. CI there: shellcheck, the core stack with `db-add` checks, and the Langfuse profile. |
 | 2026-10-28 | 8.3 done: D1–D13 recorded as meal-platform ADRs 0006–0016 (D3 and D6 share 0008, D12 and D13 share 0016). |
 | 2026-10-28 | Q9 answered → D15: no license scanning, failing or report-only (meal-platform ADR 0017). No open questions left. |
+| 2026-10-28 | 7.1, 7.2 and 7.4 done on `feat/enforce-python-rules`. 7.2 found four rules only the docs stated; ruff now bans `from __future__ import annotations`, `Any` in domain/application signatures (`ANN401`) and broad `except` (`BLE`); pyright disregards `# type: ignore` and fails on an unneeded `# pyright: ignore`. Breaking for services: code with these patterns fails `make check` after `make update-template`. |

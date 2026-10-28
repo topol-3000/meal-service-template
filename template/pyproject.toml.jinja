@@ -59,7 +59,8 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = [
     "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RET", "PTH",
-    "ASYNC", "S", "T20", "PT", "RUF", "TRY", "FBT", "PL", "LOG", "G", "TID",
+    "ASYNC", "S", "T20", "PT", "RUF", "TRY", "FBT", "PL", "LOG", "G", "TID", "BLE",
+    "ANN401",
 ]
 ignore = [
     "PLR2004", # magic values are fine in tests and status codes
@@ -68,6 +69,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "PLR2004", "FBT"]
+# No `Any` in signatures holds for domain and application code only.
+"!src/{{ package_name }}/{domain,application}/**" = ["ANN401"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "logging.getLogger".msg = "Use structlog.get_logger() from {{ package_name }}.observability"
@@ -78,6 +81,7 @@ ignore = [
 "typing.Union".msg = "Use `X | Y`"
 "typing.List".msg = "Use the built-in `list`"
 "typing.Dict".msg = "Use the built-in `dict`"
+"__future__.annotations".msg = "Annotations are lazy in Python 3.14; remove the import"
 
 [tool.pyright]
 include = ["src", "tests"]
@@ -86,6 +90,9 @@ typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
 reportMissingTypeStubs = false
+# `# type: ignore` hides nothing; `# pyright: ignore[<rule>]` must still be needed.
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
 
 # Layering (see AGENTS.md). Run with `make imports`; part of `make check`.
 [tool.importlinter]

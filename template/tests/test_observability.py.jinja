@@ -15,7 +15,7 @@ from {{ package_name }}.settings import Settings
 
 def _add_ping_route(app: FastAPI) -> FastAPI:
     @app.get("/ping")
-    async def ping() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+    async def ping() -> dict[str, str]:
         get_logger("test").info("ping.handled", answer="pong")
         return {"ping": "pong"}
 

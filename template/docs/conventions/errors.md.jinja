@@ -199,7 +199,8 @@ into a miss instead of an error, because the cache is optional (see [caching.md]
 
 - Catch the narrowest exception that you can handle. `except Exception` appears only where
   the process must keep going whatever happens: the readiness checks in `api/health.py` and
-  the catch-all handler in `api/errors.py`.
+  the catch-all handler in `api/errors.py`. Ruff flags any other; the one in
+  `api/health.py` is marked as intended.
 - Never catch to log and re-raise. Log once, where the error is handled: for errors that
   reach HTTP, that is `api/errors.py`, so use cases and adapters that raise do not log.
 - An error that is handled and swallowed (a cache miss on an unavailable cache) is logged
