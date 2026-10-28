@@ -20,11 +20,12 @@ here; this page covers the choices they leave open.
   data you parse is a Pydantic model, data you own is a dataclass.
 - Closed sets of values: `StrEnum`, or `Literal[...]` for a few strings in one place.
 - Annotations are lazy (PEP 649, the default in 3.14): no `from __future__ import annotations`
-  and no string annotations, also for forward references.
-- No `Any` in domain or application signatures: `object` or a Protocol. `cast()` only with a
-  comment saying why it holds.
-- No bare `# type: ignore`. When pyright can't see something (an untyped library), use
-  `# pyright: ignore[<rule>]` with a comment giving the reason.
+  and no string annotations, also for forward references. Ruff bans the import.
+- No `Any` in domain or application signatures: `object` or a Protocol. Ruff checks the
+  parameter and return annotations. `cast()` only with a comment saying why it holds.
+- No `# type: ignore`: pyright is set to disregard it, so the error still shows. When
+  pyright can't see something (an untyped library), use `# pyright: ignore[<rule>]` with a
+  comment giving the reason; one that no longer suppresses anything is an error.
 
 ```python
 from collections.abc import Sequence
@@ -105,7 +106,7 @@ And:
 | `utils.py` / `helpers.py` | put the function next to its only user, or in a module named after the concept |
 | mutable module-level state | state on an instance or in `AppState`; module level holds constants, `_logger`, `_tracer` |
 | deep inheritance | composition: hold the other object |
-| `except Exception` around business code | catch what you can handle (see [errors.md](errors.md#catching)) |
+| `except Exception` around business code | catch what you can handle (see [errors.md](errors.md#catching)); ruff flags a broad catch |
 | returning `None` (or `False`) to signal an error | raise a domain error |
 | `**kwargs` passed through to another call | spell the parameters out, so pyright checks them |
 | a boolean parameter that switches behaviour | two functions, or a `StrEnum` (ruff's `FBT` rules) |

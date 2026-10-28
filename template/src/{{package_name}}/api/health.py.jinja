@@ -62,7 +62,7 @@ async def _run(name: str, check: ReadinessCheck, limit_seconds: float) -> CheckR
         )
         return "failed"
     # Any failure means "not ready"; the probe must answer, not crash.
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         _logger.warning("health.check_failed", check=name, error=repr(exc))
         return "failed"
     return "ok"

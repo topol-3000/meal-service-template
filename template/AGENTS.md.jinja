@@ -93,7 +93,7 @@ Dependency direction: `api → application → domain ← infrastructure`, check
 ## Code rules
 
 - Python {{ python_version }}, full type hints, pyright strict must pass. No `Any` in signatures
-  of domain or application code; no `# type: ignore` without an error code and a reason.
+  of domain or application code; no `# type: ignore`, only `# pyright: ignore[<rule>]` with a reason.
 - Pydantic models at the boundaries (API, LLM output, other services' payloads, settings);
   frozen dataclasses inside the domain. API schemas subclass `ApiModel`.
 - Async all the way for I/O. No blocking calls (`requests`, `time.sleep`) in async code.
